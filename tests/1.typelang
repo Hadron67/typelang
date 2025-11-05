@@ -1,0 +1,18 @@
+module Eq {
+    Self: [n: _, T: Type(n)] -> T -> T -> Type(n);
+    refl: [n: _, T: Type(n)](x: T) -> Self(x, x);
+    ind: [n: _, T: Type(n), C: [x: T, y: T] -> Self(x, y) -> Type(n)] -> ((x: T) -> C(refl(x))) -> [x: T, y: T](p: Self(x, y)) -> C(p);
+    ind(?c0, refl(?x)) = c0(x);
+};
+
+module Truncated {
+    Self: [n: _] -> Type(n) -> Type(n);
+    trunc: [n: _, T: Type(n)] -> T -> Self(T);
+    eq: [n: _, T: Type(n)](a: Self(T), b: Self(T)) -> Eq(a, b);
+}
+
+inductive COrd {
+    zero: COrd;
+    succ: COrd -> COrd;
+    sup: (Nat -> COrd) -> COrd;
+}

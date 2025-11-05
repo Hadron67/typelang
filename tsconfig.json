@@ -1,0 +1,12 @@
+{
+    "compilerOptions": {
+        "checkJs": true,
+        "noEmit": true,
+        "strictNullChecks": true,
+        "noImplicitAny": true,
+        "lib": ["es2015", "dom"],
+        "module": "es2020",
+        "moduleResolution": "bundler",
+        "noImplicitThis": true
+    }
+}
