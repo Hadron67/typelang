@@ -1,6 +1,6 @@
 import {readFile} from 'fs/promises';
 import { FileId, parse, renderSourceMessage } from './parser';
-import { BuiltinSymbols, Expression, SymbolRegistry } from './analyse';
+import { BuiltinSymbols, checkTypes, Expression, renderTypeCheckResult, SymbolRegistry } from './analyse';
 import { HIRHost, irgen, parseAndIrgen } from './irgen';
 
 async function run(entry: string) {
@@ -10,8 +10,19 @@ async function run(entry: string) {
     const builtins = new BuiltinSymbols(reg);
     const parseResult = parseAndIrgen(builtins, builtins.getInitialScope(), file, 0 as FileId);
     if (parseResult.isLeft) {
+        console.log('hir:');
         for (const line of parseResult.value.dump(reg)) {
             console.log(line);
+        }
+        const typeCheck = checkTypes(reg, builtins, parseResult.value);
+        if (typeCheck !== null) {
+            for (const line of renderTypeCheckResult(typeCheck)) {
+                console.log(line);
+            }
+        } else {
+            for (const line of reg.dump()) {
+                console.log(line);
+            }
         }
     } else {
         for (const msg of parseResult.value) {
