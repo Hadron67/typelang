@@ -81,6 +81,7 @@ export interface SymbolData {
     readonly parent: Symbol | null;
     readonly evaluator?: (args: Expression[]) => Expression | null;
     readonly flags: number;
+    removed?: boolean;
     subSymbols?: Map<string, Symbol>;
     type?: Expression;
     value?: Expression;
@@ -210,6 +211,7 @@ export class BuiltinSymbols {
 export class SymbolRegistry {
     private readonly symbolOffset: number;
     private readonly symbols: SymbolData[] = [];
+    private readonly removedSymbols: Symbol[] = [];
     constructor(private readonly parent: SymbolRegistry | null) {
         this.symbolOffset = parent === null ? 0 : parent.symbolOffset + parent.symbols.length;
     }
@@ -253,7 +255,10 @@ export class SymbolRegistry {
     }
     forEachLocalSymbol(cb: (s: Symbol, entry: SymbolData) => void) {
         for (let i = 0, a = this.symbols; i < a.length; i++) {
-            cb(this.symbolOffset + i as Symbol, a[i]);
+            const entry = a[i];
+            if (!entry.removed) {
+                cb(this.symbolOffset + i as Symbol, a[i]);
+            }
         }
     }
     emitUnknown(type: Expression): SymbolExpression {
@@ -270,6 +275,57 @@ export class SymbolRegistry {
             this.symbols.push(d);
         }
         reg.symbols.length = 0;
+    }
+    substituteTemps(expr: Expression) {
+        return mapExpression(expr, (expr, info) => {
+            if (expr.kind === ExpressionKind.SYMBOL) {
+                const entry = this.getSymbolEntry(expr.symbol);
+                if (0 !== (entry.flags & SymbolFlags.IS_TEMP) && entry.value !== void 0) {
+                    info.rerun(entry.value);
+                    return;
+                }
+            }
+            info.emit(expr);
+        }) ?? panic();
+    }
+    substituteAllTemps() {
+        this.forEachLocalSymbol((symbol, entry) => {
+            if (entry.type !== void 0) {
+                entry.type = this.substituteTemps(entry.type);
+            }
+            if (entry.value !== void 0) {
+                entry.value = this.substituteTemps(entry.value);
+            }
+        });
+    }
+    cleanupTemps() {
+        const marked: boolean[] = [];
+        for (let i = 0; i < this.symbols.length; i++) {
+            marked.push(false);
+        }
+        const visitOne = (expr: Expression) => {
+            mapExpression(expr, (expr, info) => {
+                if (expr.kind === ExpressionKind.SYMBOL && this.isLocalSymbol(expr.symbol)) {
+                    marked[expr.symbol - this.symbolOffset] = true;
+                }
+                info.emit(expr);
+            });
+        }
+        this.forEachLocalSymbol((s, e) => {
+            if (e.type !== void 0) {
+                visitOne(e.type);
+            }
+            if (e.value !== void 0) {
+                visitOne(e.value);
+            }
+        });
+        for (let i = 0, a = this.symbols; i < a.length; i++) {
+            const entry = a[i];
+            if (0 !== (entry.flags & SymbolFlags.IS_TEMP) && !marked[i]) {
+                entry.removed = true;
+                this.removedSymbols.push(i + this.symbolOffset as Symbol);
+            }
+        }
     }
     dump() {
         const lines: string[] = [];
@@ -427,29 +483,44 @@ export function inputForm(registry: SymbolRegistry, expr: Expression) {
     return stack[0];
 }
 
-export type MapExpressionAction = (Expression | ((stack: Expression[], todo: MapExpressionAction[]) => void))[];
-export function mapExpression(expr: Expression, mapper: (expr: Expression) => Expression | null) {
+export interface MapperInfo {
+    terminate(): void;
+    rerun(expr: Expression): void;
+    emit(expr: Expression): void;
+}
+
+export function mapExpression(expr: Expression, mapper: (expr: Expression, info: MapperInfo) => void) {
     const todo: (Expression | ((stack: Expression[]) => Expression))[] = [expr];
     const stack: Expression[] = [];
+    let terminated = false;
+    const info: MapperInfo = {
+        terminate() {
+            terminated = true;
+        },
+        rerun(expr) {
+            todo.push(expr);
+        },
+        emit(expr) {
+            stack.push(expr);
+        }
+    };
     while (todo.length > 0) {
         const t = todo.pop()!;
         if (typeof t === 'function') {
-            const m = mapper(t(stack));
-            if (m === null) {
+            mapper(t(stack), info);
+            if (terminated) {
                 return null;
             }
-            stack.push(m);
             continue;
         }
         switch (t.kind) {
             case ExpressionKind.NUMBER:
             case ExpressionKind.STRING:
             case ExpressionKind.SYMBOL: {
-                const m = mapper(t);
-                if (m === null) {
+                mapper(t, info);
+                if (terminated) {
                     return null;
                 }
-                stack.push(m);
                 break;
             }
             case ExpressionKind.CALL: {
@@ -468,42 +539,46 @@ export function mapExpression(expr: Expression, mapper: (expr: Expression) => Ex
             }
             case ExpressionKind.FN_TYPE: {
                 const {loc, color} = t;
-                let arg = t.arg;
-                if (arg !== void 0) {
-                    const n = mapper(arg);
-                    if (n === null) return null;
-                    assert(n.kind === ExpressionKind.SYMBOL);
-                    arg = n;
-                }
                 todo.push(stack => {
                     const typeLevel = stack.pop()!;
                     const outputType = stack.pop()!;
                     const inputType = stack.pop()!;
+                    let arg: SymbolExpression | undefined = void 0;
+                    if (t.arg !== void 0) {
+                        const a = stack.pop()!;
+                        assert(a.kind === ExpressionKind.SYMBOL);
+                        arg = a;
+                    }
                     if (inputType !== t.inputType || outputType !== t.outputType || typeLevel !== t.typeLevel) {
                         return {kind: ExpressionKind.FN_TYPE, inputType, outputType, arg, color, typeLevel, loc};
                     } else {
                         return t;
                     }
                 }, t.typeLevel, t.outputType, t.inputType);
+                if (t.arg !== void 0) {
+                    todo.push(t.arg);
+                }
                 break;
             }
             case ExpressionKind.LAMBDA: {
-                let arg = t.arg;
-                if (arg !== void 0) {
-                    const n = mapper(arg);
-                    if (n === null) return null;
-                    assert(n.kind === ExpressionKind.SYMBOL);
-                    arg = n;
-                }
                 todo.push(stack => {
                     const type = stack.pop()!;
                     const body = stack.pop()!;
+                    let arg: SymbolExpression | undefined = void 0;
+                    if (t.arg !== void 0) {
+                        const a = stack.pop()!;
+                        assert(a.kind === ExpressionKind.SYMBOL);
+                        arg = a;
+                    }
                     if (body !== t.body || type !== t.type) {
                         return {kind: ExpressionKind.LAMBDA, arg, body, type, loc: t.loc};
                     } else {
                         return t;
                     }
                 }, t.type, t.body);
+                if (t.arg !== void 0) {
+                    todo.push(t.arg);
+                }
                 break;
             }
             case ExpressionKind.UNIVERSE: {
@@ -525,20 +600,22 @@ export function mapExpression(expr: Expression, mapper: (expr: Expression) => Ex
 }
 
 export function replaceOneSymbol(expr: Expression, s: Symbol, replacement: Expression) {
-    return mapExpression(expr, expr => {
+    return mapExpression(expr, (expr, info) => {
         if (expr.kind === ExpressionKind.SYMBOL && expr.symbol === s) {
-            return replacement;
+            info.emit(replacement);
+        } else {
+            info.emit(expr);
         }
-        return expr;
     }) ?? panic();
 }
 
 export function replaceSymbols(expr: Expression, m: Map<Symbol, Expression>) {
-    return mapExpression(expr, expr => {
+    return mapExpression(expr, (expr, info) => {
         if (expr.kind === ExpressionKind.SYMBOL) {
-            return m.get(expr.symbol) ?? expr;
+            info.emit(m.get(expr.symbol) ?? expr);
+        } else {
+            info.emit(expr);
         }
-        return expr;
     }) ?? panic();
 }
 
@@ -886,6 +963,8 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         }
         console.log('passed');
         registry.mergeFrom(tempRegistry);
+        registry.substituteAllTemps();
+        registry.cleanupTemps();
         // tempRegistry.forEachLocalSymbol((symbol, entry) => {
         //     if (0 !== (entry.flags & SymbolFlags.IS_TEMP)) {
         //         assert(entry.value !== void 0);
