@@ -1,4 +1,6 @@
 module Eq {
-    Self: [n: _, T: Type(n)] -> T -> T -> Type(n);
-    refl: [n: _, T: Type(n)](x: T) -> Self(x, x);
+    Self: [n, T: Type(n)] -> T -> T -> Type(n);
+    refl: [n, T: Type(n)](x: T) -> Self(x, x);
+
+    ind: [n, T: Type(n)](C: [x: T, y] -> Self(x, y) -> Type(n)) -> ((x: T) -> C(refl(x))) -> [x, y](p: Self(x, y)) -> C(p);
 }

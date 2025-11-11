@@ -74,6 +74,14 @@ export function constArray<T>(value: T, length: number) {
     return ret;
 }
 
+export function makeArray<T>(creator: (i: number) => T, length: number) {
+    const ret: T[] = [];
+    for (let i = 0; i < length; i++) {
+        ret.push(creator(i));
+    }
+    return ret;
+}
+
 export type Either<L, R> = EitherLeft<L> | EitherRight<R>;
 
 export interface EitherLeft<T> {
