@@ -211,7 +211,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
     //     return ret;
     // }
 
-    function genExpression(expr: Ast, patternResolver: PatternResolver | undefined): HIRReg {
+    function genExpression(expr: Ast): HIRReg {
         const loc = asSourceRange(expr);
         switch (expr.kind) {
             case AstKind.IDENTIFIER: {
@@ -223,17 +223,11 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
                     }
                 }
                 if (name === '_') {
-                    return hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.IS_TEMP | SymbolFlags.ALLOW_ASSIGNMENT | SymbolFlags.ALLOW_DEF_TYPE}, loc);
+                    return hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.MUST_HAVE_VALUE | SymbolFlags.AUTO_SUBSTITUTE | SymbolFlags.ALLOW_ASSIGNMENT | SymbolFlags.ALLOW_DEF_TYPE}, loc);
                 }
                 if (name === 'Self') {
                     assert(selfStack.length > 0);
                     return selfStack[selfStack.length - 1];
-                }
-                if (patternResolver !== void 0) {
-                    const p = patternResolver(expr, false);
-                    if (p !== null) {
-                        return p;
-                    }
                 }
                 // if (/^[ui][0-9]+$/g.test(name)) {
                 //     const signed = name.charCodeAt(0) === CCODE_I;
@@ -249,27 +243,16 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
             case AstKind.STRING: {
                 return hir.emit({kind: HIRKind.EXPR, expr: {kind: ExpressionKind.STRING, value: expr.value, loc}}, loc);
             }
-            case AstKind.PATTERN: {
-                if (patternResolver === void 0) {
-                    diagnostics.push({...asSourceRange(expr), msg: 'pattern not allow here'});
-                    break;
-                }
-                const ret = patternResolver(expr.name, true);
-                if (ret === null) {
-                    break;
-                }
-                return ret;
-            }
-            case AstKind.FN_TYPE: return genFnType(expr, patternResolver);
+            case AstKind.FN_TYPE: return genFnType(expr);
             case AstKind.LAMBDA: {
                 let arg: HIRReg | undefined = void 0;
                 if (expr.arg.name !== '_') {
-                    const arg = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: 0}, expr.arg);
+                    const arg = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE | SymbolFlags.MAY_CONTAINS_LOCAL}, expr.arg);
                     const newScope = new Map<string, HIRReg>();
                     newScope.set(expr.arg.name, arg);
                     scopes.push(newScope);
                 }
-                const ret = hir.emit({kind: HIRKind.LAMBDA, arg, body: genExpression(expr.body, patternResolver)}, loc);
+                const ret = hir.emit({kind: HIRKind.LAMBDA, arg, body: genExpression(expr.body)}, loc);
                 if (arg !== void 0) {
                     scopes.pop();
                 }
@@ -277,14 +260,14 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
             }
             // case AstKind.BLOCK: return genBlock(expr);
             case AstKind.CALL: {
-                const fn = genExpression(expr.fn, patternResolver) ?? panic();
+                const fn = genExpression(expr.fn);
                 let arg: HIRReg | undefined = void 0;
                 if (expr.arg !== void 0) {
-                    arg = genExpression(expr.arg, patternResolver) ?? panic();
+                    arg = genExpression(expr.arg);
                 } else {
                     arg = hir.emit({kind: HIRKind.EXPR, expr: se(builtins.unit)}, void 0);
                 }
-                return hir.emit({kind: HIRKind.CALL, fn, arg, color: expr.color, isPattern: patternResolver !== void 0}, loc);
+                return hir.emit({kind: HIRKind.CALL, fn, arg, color: expr.color, isPattern: false}, loc);
             }
             default: panic();
         }
@@ -307,14 +290,14 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
     }
 
     function emitUnknown(type: HIRReg | undefined) {
-        const ret = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.IS_TEMP | SymbolFlags.ALLOW_ASSIGNMENT | SymbolFlags.ALLOW_DEF_TYPE}, void 0);
+        const ret = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.MUST_HAVE_VALUE | SymbolFlags.AUTO_SUBSTITUTE | SymbolFlags.ALLOW_ASSIGNMENT | SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.ALLOW_INFERED_DOWN_VALUE | SymbolFlags.MAY_CONTAINS_LOCAL}, void 0);
         if (type !== void 0) {
             hir.emit({kind: HIRKind.SYMBOL_TYPE, symbol: ret, type}, void 0);
         }
         return ret;
     }
 
-    function genFnType(expr: AstFnType, patternResolver: PatternResolver | undefined): HIRReg {
+    function genFnType(expr: AstFnType): HIRReg {
         const args = expr.inputType;
         if (args.isArgList) {
             const color = args.color;
@@ -322,20 +305,20 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
             const scope = new Map<string, HIRReg>();
             scopes.push(scope);
             for (const [arg, argType] of args.args) {
-                const inputType = argType !== void 0 ? genExpression(argType, patternResolver) : emitUnknown(void 0);
-                const argVar = hir.emit({kind: HIRKind.SYMBOL, flags: SymbolFlags.ALLOW_DEF_TYPE, parent: null}, arg);
+                const inputType = argType !== void 0 ? genExpression(argType) : emitUnknown(void 0);
+                const argVar = hir.emit({kind: HIRKind.SYMBOL, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE | SymbolFlags.MAY_CONTAINS_LOCAL, parent: null}, arg);
                 hir.emit({kind: HIRKind.SYMBOL_TYPE, symbol: argVar, type: inputType}, void 0);
                 scope.set(arg.name, argVar);
                 fns.push({color, inputType, arg: argVar, loc: argType !== void 0 ? sourceRangeBetween(arg, argType) : asSourceRange(arg)});
             }
-            const outputType = genExpression(expr.outputType, patternResolver);
+            const outputType = genExpression(expr.outputType);
             scopes.pop();
             return partialFnTypesToFnType(fns, outputType);
         } else {
             return hir.emit({
                 kind: HIRKind.FN_TYPE,
-                inputType: genExpression(args.type, patternResolver),
-                outputType: genExpression(expr.outputType, patternResolver),
+                inputType: genExpression(args.type),
+                outputType: genExpression(expr.outputType),
                 color: 0,
             }, expr);
         }
@@ -374,11 +357,11 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
                             const entry = hir.regs[symbol].value;
                             assert(entry.kind === HIRKind.SYMBOL);
                             if (type !== void 0) {
-                                hir.emit({kind: HIRKind.SYMBOL_TYPE, symbol, type: genExpression(type, void 0)}, decl);
+                                hir.emit({kind: HIRKind.SYMBOL_TYPE, symbol, type: genExpression(type)}, decl);
                                 entry.flags |= SymbolFlags.ALLOW_DEF_TYPE;
                             }
                             if (rhs !== void 0) {
-                                hir.emit({kind: HIRKind.SYMBOL_ASSIGN, symbol, value: genExpression(rhs, void 0)}, decl);
+                                hir.emit({kind: HIRKind.SYMBOL_ASSIGN, symbol, value: genExpression(rhs)}, decl);
                                 entry.flags |= SymbolFlags.ALLOW_ASSIGNMENT;
                             }
                             break;
@@ -391,6 +374,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
                                 assert(entry.kind === HIRKind.SYMBOL);
                                 const rule = genRule(lhs, rhs);
                                 hir.emit({kind: HIRKind.SYMBOL_DOWNVALUE, symbol, rule}, decl);
+                                entry.flags |= SymbolFlags.ALLOW_DOWN_VALUE;
                                 break;
                             }
                             diagnostics.push({...asSourceRange(decl), msg: 'invalid declaration'});
@@ -418,24 +402,10 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
 
     function genRule(lhs: Ast, rhs: Ast): HIRRule {
         const patternsByName = new Map<string, HIRReg>();
-        const l = genExpression(lhs, (name, isPattern) => {
-            if (isPattern) {
-                if (name === void 0 || !patternsByName.has(name.name)) {
-                    const p = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.IS_PATTERN | SymbolFlags.ALLOW_DEF_TYPE}, name);
-                    if (name !== void 0) {
-                        patternsByName.set(name.name, p);
-                    }
-                    return p;
-                }
-            }
-            return patternsByName.get(name?.name ?? panic()) ?? null;
-        });
-        const r = genExpression(rhs, (name, isPattern) => {
-            if (!isPattern && name !== void 0) {
-                return patternsByName.get(name.name) ?? null;
-            }
-            return null;
-        });
+        const l = genPatternLhs(lhs, false, patternsByName);
+        scopes.push(patternsByName);
+        const r = genExpression(rhs);
+        scopes.pop();
         return {lhs: l, rhs: r};
     }
 
@@ -444,6 +414,38 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
             expr = expr.fn;
         }
         return expr;
+    }
+
+    function genPatternLhs(expr: Ast, isHead: boolean, patterns: Map<string, HIRReg>): HIRReg {
+        switch (expr.kind) {
+            case AstKind.CALL: {
+                const fn = genPatternLhs(expr.fn, true, patterns);
+                const arg = expr.arg !== void 0 ? genPatternLhs(expr.arg, false, patterns) : hir.emit({kind: HIRKind.EXPR, expr: se(builtins.unit)}, void 0);
+                return hir.emit({kind: HIRKind.CALL, isPattern: true, fn, arg, color: expr.color}, expr);
+            }
+            case AstKind.IDENTIFIER: {
+                if (isHead) {
+                    return genExpression(expr);
+                } else {
+                    const name = expr.name;
+                    const s = name !== '_' ? patterns.get(name) : void 0;
+                    if (s !== void 0) {
+                        return s;
+                    }
+                    const ns = hir.emit({kind: HIRKind.SYMBOL, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE, name, parent: null}, expr);
+                    if (name !== '_') {
+                        patterns.set(name, ns);
+                    }
+                    return ns;
+                }
+            }
+            case AstKind.NUMBER:
+            case AstKind.STRING: return genExpression(expr);
+            default:
+                // lambdas are not allowed
+                diagnostics.push({...asSourceRange(expr), msg: 'invalid pattern'});
+                return NULL;
+        }
     }
 }
 

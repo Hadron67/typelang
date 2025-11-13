@@ -28,6 +28,7 @@ const CCODE_N = 'n'.charCodeAt(0);
 const CCODE_L = 'l'.charCodeAt(0);
 const CCODE_SEMI_COLON = ';'.charCodeAt(0);
 const CCODE_UNDERSCORE = '_'.charCodeAt(0);
+const CCODE_QUOTE = '\''.charCodeAt(0);
 
 const CCODE_SPACE = ' '.charCodeAt(0);
 const CCODE_CR = '\r'.charCodeAt(0);
@@ -430,7 +431,11 @@ function isIdentifierStart(ch: number) {
 }
 
 function isIdentifierPart(ch: number) {
-    return ch >= CCODE_A && ch <= CCODE_Z || ch >= CCODE_LOWER_A && ch <= CCODE_LOWER_Z || ch >= CCODE_0 && ch <= CCODE_9 || ch === CCODE_UNDERSCORE;
+    return ch >= CCODE_A && ch <= CCODE_Z || ch >= CCODE_LOWER_A && ch <= CCODE_LOWER_Z || ch >= CCODE_0 && ch <= CCODE_9 || ch === CCODE_UNDERSCORE || ch === CCODE_DASH;
+}
+
+function isIdentifierSuffix(ch: number) {
+    return ch === CCODE_QUOTE;
 }
 
 function isDigit(ch: number) {
@@ -577,6 +582,10 @@ export function parse(source: string, file: FileId): Either<Ast[], SourceRangeMe
                 if (isIdentifierStart(source.charCodeAt(cursor))) {
                     let value = '';
                     while (cursor < source.length && isIdentifierPart(source.charCodeAt(cursor))) {
+                        value += source.charAt(cursor);
+                        cursor++;
+                    }
+                    while (cursor < source.length && isIdentifierSuffix(source.charCodeAt(cursor))) {
                         value += source.charAt(cursor);
                         cursor++;
                     }

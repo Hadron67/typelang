@@ -5,14 +5,20 @@ module bool {
     true: bool;
     false: bool;
     ind: [n, C: bool -> Type(n)] -> C(true) -> C(false) -> (x: bool) -> C(x);
-    ind(?t, ?, true) = t;
-    ind(?, ?t, false) = t;
 }
 
 module Nat {
     Self: Type(0);
     zero: Self;
     succ: Self -> Self;
+
+    max: Self -> Self -> Self;
+    max(x, zero) = x;
+    max(x, succ(y)) = max-succ(y, x);
+
+    max-succ: Self -> Self -> Self;
+    max-succ(y, zero) = succ(y);
+    max-succ(y, succ(x)) = succ(max(x, y));
 }
 
 module Bit {

@@ -1,0 +1,9 @@
+Symbol: Type(0);
+
+module Expr {
+    Self: Type(0);
+    symbol: Symbol -> Self;
+    fn-type: Self -> Symbol -> Self -> Self;
+    lambda: Symbol -> Self -> Self;
+    call: Self -> Self -> Self;
+}
