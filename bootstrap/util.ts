@@ -100,3 +100,13 @@ export type Mutable<T> = {
 export interface Logger {
     info(msg: () => string | string[]): void;
 }
+
+export class Timer {
+    private now: Date = new Date();
+    elapsed() {
+        const s = new Date();
+        const ret = s.valueOf() - this.now.valueOf();
+        this.now = s;
+        return ret;
+    }
+}

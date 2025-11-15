@@ -10,6 +10,30 @@ module Eq {
 
     concat: [n, T: Type(n), x: T, y, z] -> Self(x, y) -> Self(y, z) -> Self(x, z);
     concat(refl(?x), refl(?x)) = refl(x);
+
+    transport: [n, n', T: Type(n), x: T, y, P: T -> Type(n')] -> Self(x, y) -> P(x) -> P(y);
+    transport(refl(?), ?p0) = p0;
+
+    transportconst: [n, n', A: Type(n), B: Type(n'), x: A, y](p: Self(x, y), b: B) -> Self(transport(p, b), b);
+    transportconst(refl(?x), ?b) = refl(b);
+
+    ap: [n, n', A: Type(n), B: Type(n'), x: A, y](f: A -> B, p: Self(x, y)) -> Self(f(x), f(y));
+    ap(?, refl(?)) = refl(_);
+
+    apd: [n, n', A: Type(n), B: A -> Type(n'), x: A, y](f: (x: A) -> B(x), p: Self(x, y)) -> Self(transport(p, f(x)), f(y));
+    apd(?, refl(?)) = refl(_);
+
+    lemma-2-3-8: [n, n', A: Type(n), B: Type(n'), x: A, y](f: A -> B, p: Self(x, y)) -> Self(apd(f, p), concat(transportconst(p, f(x)), ap(f, p)));
+    lemma-2-3-8(?, refl(?)) = refl(_);
+
+    lemma-2-3-9: [n, n', A: Type(n), P: A -> Type(n'), x: A, y: A, z, u: P(x)](p: Self(x, y), q: Self(y, z)) -> Self(transport(q, transport(p, u)), transport(concat(p, q), u));
+    lemma-2-3-9(refl(?x), refl(?x)) = refl(_);
+
+    lemma-2-3-10: [n1, n2, n3, A: Type(n1), B: Type(n2), f: A -> B, P: B -> Type(n3), x: A, y](p: Self(x, y), u: P(f(x))) -> Self(transport(p, u), transport(ap(f, p), u));
+    lemma-2-3-10(refl(?), ?) = refl(_);
+
+    lemma-2-3-11: [n, n1, n2, A: Type(n), P: A -> Type(n1), Q: A -> Type(n2), f: (x: A) -> P(x) -> Q(x), x: A, y](p: Self(x, y), u: P(x)) -> Self(transport(p, f(x, u)), f(y, transport(p, u)));
+    lemma-2-3-11(refl(?), ?) = refl(_);
 }
 
 module Sum {

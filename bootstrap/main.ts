@@ -2,6 +2,24 @@ import {readFile} from 'fs/promises';
 import { FileId, parse, renderSourceMessage } from './parser';
 import { BuiltinSymbols, checkTypes, Expression, renderTypeCheckResult, SymbolRegistry } from './analyse';
 import { HIRHost, irgen, parseAndIrgen } from './irgen';
+import { Logger } from './util';
+
+const VERBOSE: Logger = {
+    info(msg) {
+        const l = msg();
+        if (Array.isArray(l)) {
+            for (const line of l) {
+                console.log(line);
+            }
+        } else {
+            console.log(l);
+        }
+    }
+};
+
+const NO_LOG: Logger = {
+    info() {},
+};
 
 async function run(entry: string) {
     const file = await readFile(entry, 'utf-8');
@@ -14,18 +32,7 @@ async function run(entry: string) {
         for (const line of parseResult.value.dump(reg)) {
             console.log(line);
         }
-        const typeCheck = checkTypes(reg, builtins, parseResult.value, {
-            info(msg) {
-                const l = msg();
-                if (Array.isArray(l)) {
-                    for (const line of l) {
-                        console.log(line);
-                    }
-                } else {
-                    console.log(l);
-                }
-            }
-        });
+        const typeCheck = checkTypes(reg, builtins, parseResult.value, VERBOSE);
         if (typeCheck !== null) {
             for (const line of renderTypeCheckResult(typeCheck)) {
                 console.log(line);

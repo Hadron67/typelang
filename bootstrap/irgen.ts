@@ -342,7 +342,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
     }
 
     function emitUnknown(type: HIRReg | undefined) {
-        const ret = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.MUST_HAVE_VALUE | SymbolFlags.AUTO_SUBSTITUTE | SymbolFlags.ALLOW_ASSIGNMENT | SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.ALLOW_INFERED_DOWN_VALUE | SymbolFlags.MAY_CONTAINS_LOCAL}, void 0);
+        const ret = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.MUST_HAVE_VALUE | SymbolFlags.AUTO_SUBSTITUTE | SymbolFlags.ALLOW_ASSIGNMENT | SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.MAY_CONTAINS_LOCAL}, void 0);
         if (type !== void 0) {
             hir.emit({kind: HIRKind.SYMBOL_TYPE, symbol: ret, type}, void 0);
         }
