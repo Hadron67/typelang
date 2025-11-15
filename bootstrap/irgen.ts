@@ -1,5 +1,5 @@
 import { ExpressionKind, BuiltinSymbols, Expression, SymbolRegistry, inputForm, se, Symbol, SymbolFlags } from "./analyse";
-import { asSourceRange, Ast, AstBlock, AstFnType, AstFnTypeArgList, AstIdentifier, AstKind, AstLet, AstModuelDecl, AstModule, FileId, parse, SourceRange, sourceRangeBetween, SourceRangeMessage } from "./parser";
+import { asSourceRange, Ast, AstBlock, AstCall, AstFnType, AstFnTypeArgList, AstIdentifier, AstKind, AstLet, AstModuelDecl, AstModule, FileId, parse, SourceRange, sourceRangeBetween, SourceRangeMessage } from "./parser";
 import { assert, Either, Mutable, panic } from "./util";
 
 export const enum HIRKind {
@@ -8,10 +8,11 @@ export const enum HIRKind {
     LAMBDA,
     CALL,
     FN_TYPE,
+    MEMBER_ACCESS,
     SYMBOL,
     SYMBOL_TYPE,
     SYMBOL_ASSIGN,
-    SYMBOL_DOWNVALUE,
+    SYMBOL_RULE,
 }
 
 export type HIRReg = number & { __marker: HIRReg };
@@ -22,10 +23,11 @@ export type HIRData =
     | HIRNumber
     | HIRFnType
     | HIRLambda
+    | HIRMemberAccess
     | HIRSymbol
     | HIRSymbolType
     | HIRSymbolAssignment
-    | HIRSymbolDownValue
+    | HIRSymbolRule
 ;
 
 export interface DownValue {
@@ -73,6 +75,12 @@ export interface HIRLambda {
     readonly body: HIRReg;
 }
 
+export interface HIRMemberAccess {
+    readonly kind: HIRKind.MEMBER_ACCESS;
+    readonly lhs: HIRReg;
+    readonly name: string;
+}
+
 export interface HIRRule {
     readonly lhs: HIRReg;
     readonly rhs: HIRReg;
@@ -97,9 +105,10 @@ export interface HIRSymbolAssignment {
     readonly value: HIRReg;
 }
 
-export interface HIRSymbolDownValue {
-    readonly kind: HIRKind.SYMBOL_DOWNVALUE;
+export interface HIRSymbolRule {
+    readonly kind: HIRKind.SYMBOL_RULE;
     readonly symbol: HIRReg;
+    readonly isUpValue: boolean;
     readonly rule: HIRRule;
 }
 
@@ -118,7 +127,7 @@ export class HIRHost {
     dump(registry: SymbolRegistry) {
         const ret: string[] = [];
         for (let i = 0, a = this.regs; i < a.length; i++) {
-            ret.push(`$${i} = ${dumpHIR(registry, a[i].value)}`);
+            ret.push(`%${i} = ${dumpHIR(registry, a[i].value)}`);
         }
         return ret;
     }
@@ -126,33 +135,72 @@ export class HIRHost {
 
 export function dumpHIR(registry: SymbolRegistry, data: HIRData): string {
     switch (data.kind) {
-        case HIRKind.CALL: return data.color === 0 ? `$${data.fn}($${data.arg})` : `$${data.fn}[$${data.arg}]`;
+        case HIRKind.CALL: return data.color === 0 ? `%${data.fn}($${data.arg})` : `%${data.fn}[$${data.arg}]`;
         case HIRKind.FN_TYPE: {
             if (data.color === 0) {
                 if (data.arg === void 0) {
-                    return `$${data.inputType} -> $${data.outputType}`;
+                    return `%${data.inputType} -> %${data.outputType}`;
                 } else {
-                    return `($${data.arg}: $${data.inputType}) -> $${data.outputType}`;
+                    return `(%${data.arg}: %${data.inputType}) -> %${data.outputType}`;
                 }
             } else {
                 if (data.arg === void 0) {
-                    return `[_: $${data.inputType}] -> $${data.outputType}`;
+                    return `[_: %${data.inputType}] -> %${data.outputType}`;
                 } else {
-                    return `[$${data.arg}: $${data.inputType}] -> $${data.outputType}`;
+                    return `[%${data.arg}: %${data.inputType}] -> %${data.outputType}`;
                 }
             }
         }
         case HIRKind.LAMBDA: {
-            return (data.arg !== void 0 ? `\\$${data.arg} ` : '\\_ ') + `$${data.body}`;
+            return (data.arg !== void 0 ? `\\%${data.arg} ` : '\\_ ') + `%${data.body}`;
         }
         case HIRKind.EXPR: return inputForm(registry, data.expr);
         case HIRKind.NUMBER: return data.value.toString();
-        case HIRKind.SYMBOL: return `symbol ${data.name ?? '<no name>'}${data.parent === null ? '' : `, parent = $${data.parent}`}`;
-        case HIRKind.SYMBOL_TYPE: return `$${data.symbol}: $${data.type}`;
-        case HIRKind.SYMBOL_ASSIGN: return `$${data.symbol} === $${data.value}`;
-        case HIRKind.SYMBOL_DOWNVALUE: return `$${data.rule.lhs} === $${data.rule.rhs}`;
+        case HIRKind.MEMBER_ACCESS: return `%${data.lhs}.${data.name}`;
+        case HIRKind.SYMBOL: return `symbol ${data.name ?? '<no name>'}${data.parent === null ? '' : `, parent = %${data.parent}`}`;
+        case HIRKind.SYMBOL_TYPE: return `%${data.symbol}: %${data.type}`;
+        case HIRKind.SYMBOL_ASSIGN: return `%${data.symbol} === %${data.value}`;
+        case HIRKind.SYMBOL_RULE: return `%${data.rule.lhs} === %${data.rule.rhs}`;
         default: panic();
     }
+}
+
+function getCallFn(expr: Ast) {
+    while (expr.kind === AstKind.CALL) {
+        expr = expr.fn;
+    }
+    return expr;
+}
+
+function collectAstFnArgs(expr: AstCall): [Ast, Ast[]] {
+    const args: Ast[] = [];
+    let expr0: Ast = expr;
+    while (expr0.kind === AstKind.CALL) {
+        if (expr0.arg !== void 0) {
+            args.unshift(expr0.arg);
+        }
+        expr0 = expr0.fn;
+    }
+    return [expr0, args];
+}
+
+function findRuleTag(expr: AstCall, scope: Map<string, HIRReg>): [HIRReg, boolean] | null {
+    const [fn, args] = collectAstFnArgs(expr);
+    if (fn.kind === AstKind.IDENTIFIER && scope.has(fn.name)) {
+        return [scope.get(fn.name)!, false];
+    }
+    for (const arg of args) {
+        if (arg.kind === AstKind.IDENTIFIER && scope.has(arg.name)) {
+            return [scope.get(arg.name)!, true];
+        }
+        if (arg.kind === AstKind.CALL) {
+            const fn2 = getCallFn(arg);
+            if (fn2.kind === AstKind.IDENTIFIER && scope.has(fn2.name)) {
+                return [scope.get(fn2.name)!, true];
+            }
+        }
+    }
+    return null;
 }
 
 const CCODE_I = 'i'.charCodeAt(0);
@@ -269,6 +317,10 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
                 }
                 return hir.emit({kind: HIRKind.CALL, fn, arg, color: expr.color, isPattern: false}, loc);
             }
+            case AstKind.MEMBER_ACCESS: {
+                const lhs = genExpression(expr.lhs);
+                return hir.emit({kind: HIRKind.MEMBER_ACCESS, lhs, name: expr.member.name}, expr);
+            }
             default: panic();
         }
         return NULL;
@@ -306,7 +358,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
             scopes.push(scope);
             for (const [arg, argType] of args.args) {
                 const inputType = argType !== void 0 ? genExpression(argType) : emitUnknown(void 0);
-                const argVar = hir.emit({kind: HIRKind.SYMBOL, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE | SymbolFlags.MAY_CONTAINS_LOCAL, parent: null}, arg);
+                const argVar = hir.emit({kind: HIRKind.SYMBOL, name: arg.name, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE | SymbolFlags.MAY_CONTAINS_LOCAL, parent: null}, arg);
                 hir.emit({kind: HIRKind.SYMBOL_TYPE, symbol: argVar, type: inputType}, void 0);
                 scope.set(arg.name, argVar);
                 fns.push({color, inputType, arg: argVar, loc: argType !== void 0 ? sourceRangeBetween(arg, argType) : asSourceRange(arg)});
@@ -342,7 +394,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
         const scope = new Map<string, HIRReg>();
         for (const decl of decls) {
             const name = getDeclName(decl);
-            if (name !== 'Self' && name !== null && !scope.has(name)) {
+            if (name !== 'Self' && name !== null && name !== '_' && !scope.has(name)) {
                 scope.set(name, hir.emit({kind: HIRKind.SYMBOL, name, parent: self, flags: 0}, decl));
             }
         }
@@ -353,7 +405,14 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
                     const {lhs, rhs, type} = decl;
                     switch (lhs.kind) {
                         case AstKind.IDENTIFIER: {
-                            const symbol = lhs.name === 'Self' ? self : scope.get(lhs.name) ?? panic();
+                            let symbol: HIRReg;
+                            if (lhs.name === 'Self') {
+                                symbol = self;
+                            } else if (lhs.name === '_') {
+                                symbol = hir.emit({kind: HIRKind.SYMBOL, name: '_', parent: self, flags: 0}, decl);
+                            } else {
+                                symbol = scope.get(lhs.name) ?? panic();
+                            }
                             const entry = hir.regs[symbol].value;
                             assert(entry.kind === HIRKind.SYMBOL);
                             if (type !== void 0) {
@@ -367,15 +426,17 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
                             break;
                         }
                         case AstKind.CALL: {
-                            const fn = getCallFn(lhs);
-                            if (fn.kind === AstKind.IDENTIFIER && rhs !== void 0) {
-                                const symbol = scope.get(fn.name) ?? panic();
-                                const entry = hir.regs[symbol].value;
-                                assert(entry.kind === HIRKind.SYMBOL);
-                                const rule = genRule(lhs, rhs);
-                                hir.emit({kind: HIRKind.SYMBOL_DOWNVALUE, symbol, rule}, decl);
-                                entry.flags |= SymbolFlags.ALLOW_DOWN_VALUE;
-                                break;
+                            if (rhs !== void 0) {
+                                const tagInfo = findRuleTag(lhs, scope);
+                                if (tagInfo !== null) {
+                                    const [tag, isUpValue] = tagInfo;
+                                    const entry = hir.regs[tag].value;
+                                    assert(entry.kind === HIRKind.SYMBOL);
+                                    const rule = genRule(lhs, rhs);
+                                    hir.emit({kind: HIRKind.SYMBOL_RULE, symbol: tag, rule, isUpValue}, decl);
+                                    entry.flags |= isUpValue ? SymbolFlags.ALLOW_UP_VALUE : SymbolFlags.ALLOW_DOWN_VALUE;
+                                    break;
+                                }
                             }
                             diagnostics.push({...asSourceRange(decl), msg: 'invalid declaration'});
                             break;
@@ -402,49 +463,33 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
 
     function genRule(lhs: Ast, rhs: Ast): HIRRule {
         const patternsByName = new Map<string, HIRReg>();
-        const l = genPatternLhs(lhs, false, patternsByName);
+        const l = genPatternLhs(lhs, patternsByName);
         scopes.push(patternsByName);
         const r = genExpression(rhs);
         scopes.pop();
         return {lhs: l, rhs: r};
     }
 
-    function getCallFn(expr: Ast) {
-        while (expr.kind === AstKind.CALL) {
-            expr = expr.fn;
-        }
-        return expr;
-    }
-
-    function genPatternLhs(expr: Ast, isHead: boolean, patterns: Map<string, HIRReg>): HIRReg {
+    function genPatternLhs(expr: Ast, patterns: Map<string, HIRReg>): HIRReg {
         switch (expr.kind) {
             case AstKind.CALL: {
-                const fn = genPatternLhs(expr.fn, true, patterns);
-                const arg = expr.arg !== void 0 ? genPatternLhs(expr.arg, false, patterns) : hir.emit({kind: HIRKind.EXPR, expr: se(builtins.unit)}, void 0);
+                const fn = genPatternLhs(expr.fn, patterns);
+                const arg = expr.arg !== void 0 ? genPatternLhs(expr.arg, patterns) : hir.emit({kind: HIRKind.EXPR, expr: se(builtins.unit)}, void 0);
                 return hir.emit({kind: HIRKind.CALL, isPattern: true, fn, arg, color: expr.color}, expr);
             }
-            case AstKind.IDENTIFIER: {
-                if (isHead) {
-                    return genExpression(expr);
-                } else {
-                    const name = expr.name;
-                    const s = name !== '_' ? patterns.get(name) : void 0;
-                    if (s !== void 0) {
-                        return s;
-                    }
-                    const ns = hir.emit({kind: HIRKind.SYMBOL, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE, name, parent: null}, expr);
-                    if (name !== '_') {
-                        patterns.set(name, ns);
-                    }
-                    return ns;
+            case AstKind.PATTERN: {
+                const name = expr.name;
+                const s = name !== void 0 ? patterns.get(name.name) : void 0;
+                if (s !== void 0) {
+                    return s;
                 }
+                const ns = hir.emit({kind: HIRKind.SYMBOL, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE, name: name?.name, parent: null}, expr);
+                if (name !== void 0) {
+                    patterns.set(name.name, ns);
+                }
+                return ns;
             }
-            case AstKind.NUMBER:
-            case AstKind.STRING: return genExpression(expr);
-            default:
-                // lambdas are not allowed
-                diagnostics.push({...asSourceRange(expr), msg: 'invalid pattern'});
-                return NULL;
+            default: return genExpression(expr);
         }
     }
 }
@@ -455,4 +500,54 @@ export function parseAndIrgen(builtins: BuiltinSymbols, initialScope: Map<string
         return {isLeft: false, value: parseResult.value};
     }
     return irgen(parseResult.value, initialScope, builtins);
+}
+
+export function visitHIR(hir: HIRData, cb: (reg: HIRReg) => void) {
+    switch (hir.kind) {
+        case HIRKind.CALL:
+            cb(hir.fn);
+            cb(hir.arg);
+            break;
+        case HIRKind.EXPR: break;
+        case HIRKind.FN_TYPE:
+            cb(hir.inputType);
+            if (hir.arg !== void 0) {
+                cb(hir.arg);
+            }
+            cb(hir.outputType);
+            break;
+        case HIRKind.LAMBDA:
+            if (hir.arg !== void 0) {
+                cb(hir.arg);
+            }
+            cb(hir.body);
+            break;
+        case HIRKind.MEMBER_ACCESS:
+            cb(hir.lhs);
+            break;
+        case HIRKind.SYMBOL_ASSIGN:
+            cb(hir.symbol);
+            cb(hir.value);
+            break;
+        case HIRKind.SYMBOL_RULE:
+            cb(hir.symbol);
+            cb(hir.rule.lhs);
+            cb(hir.rule.rhs);
+            break;
+        case HIRKind.SYMBOL_TYPE:
+            cb(hir.symbol);
+            cb(hir.type);
+            break;
+        default:;
+    }
+}
+
+export function generateHIRDependencies(hir: HIRHost) {
+    const ret: HIRReg[][] = [];
+    for (const data of hir.regs) {
+        const deps: HIRReg[] = [];
+        visitHIR(data.value, reg => deps.push(reg));
+        ret.push(deps);
+    }
+    return ret;
 }

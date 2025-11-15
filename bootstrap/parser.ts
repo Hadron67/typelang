@@ -284,6 +284,8 @@ export interface AstLambda extends SourceRange {
     readonly kind: AstKind.LAMBDA;
     readonly body: Ast;
     readonly arg: AstIdentifier;
+    readonly color?: number;
+    readonly type?: Ast;
 }
 
 export interface AstBinary extends SourceRange {
@@ -302,7 +304,7 @@ export interface AstStructLiteral extends SourceRange {
 export interface AstMemberAccess extends SourceRange {
     readonly kind: AstKind.MEMBER_ACCESS;
     readonly lhs: Ast;
-    readonly member: Ast;
+    readonly member: AstIdentifier;
 }
 
 export interface AstDefer extends SourceRange {
@@ -781,6 +783,34 @@ export function parse(source: string, file: FileId): Either<Ast[], SourceRangeMe
             return isbreak ? {kind: AstKind.BREAK, label, expr, file, start: s, length} : {kind: AstKind.CONTINUE, label, expr, file, start: s, length};
         }
         return parseTrailerExpression();
+    }
+
+    function isCallContinue(tk: TokenKind) {
+        switch (tk) {
+            case TokenKind.EOF:
+            case TokenKind.CLOSE_PARENTH:
+            case TokenKind.CLOSE_BRACKET:
+            case TokenKind.CLOSE_BRACE:
+            case TokenKind.COMMA:
+            case TokenKind.SEMI_COLON: return false;
+            default: return true;
+        }
+    }
+
+    function parseCallExpression2() {
+        const start = token.start;
+        let expr = parseTrailerExpression();
+        while (isCallContinue(token.kind)) {
+            if (tryExpect(TokenKind.OPEN_BRACKET)) {
+                const arg = parseExpression();
+                expect(TokenKind.CLOSE_BRACKET);
+                expr = {kind: AstKind.CALL, color: 1, fn: expr, arg, file, start, length: token.start - start};
+            } else {
+                const arg = parseExpression();
+                expr = {kind: AstKind.CALL, color: 0, fn: expr, arg, file, start, length: token.start - start};
+            }
+        }
+        return expr;
     }
 
     function parseTrailerExpression() {

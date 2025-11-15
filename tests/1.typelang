@@ -2,20 +2,23 @@ module Eq {
     Self: [n, T: Type(n)] -> T -> T -> Type(n);
     refl: [n, T: Type(n)](x: T) -> Self(x, x);
 
-    ind: [n, T: Type(n)](C: [x: T, y] -> Self(x, y) -> Type(n)) -> ((x: T) -> C(refl(x))) -> [x, y](p: Self(x, y)) -> C(p);
-    ind(C, c0, refl(x)) = c0(x);
+    ind: [n, T: Type(n), C: [x: T, y] -> Self(x, y) -> Type(n)] -> ((x: T) -> C(refl(x))) -> [x, y](p: Self(x, y)) -> C(p);
+    ind(?c0, refl(?x)) = c0(x);
 
     inv: [n, T: Type(n), x: T, y] -> Self(x, y) -> Self(y, x);
-    inv(refl(x)) = refl(x);
+    inv(refl(?x)) = refl(x);
 
     concat: [n, T: Type(n), x: T, y, z] -> Self(x, y) -> Self(y, z) -> Self(x, z);
-    concat(refl(x), refl(x)) = refl(x);
+    concat(refl(?x), refl(?x)) = refl(x);
+}
 
-    transport: [n, T: Type(n), x: T, y, P: T -> Type(n)] -> Self(x, y) -> P(x) -> P(y);
-    transport(refl(x), p0) = p0;
-
-    apd: [n, T: Type(n), x: T, y, P: T -> Type(n)](f: (x: T) -> P(x), p: Self(x, y)) -> Self(transport(p, f(x)), f(y));
-    apd(f, refl(x)) = refl(f(x));
+module Sum {
+    Self: [n](A: Type(n)) -> (A -> Type(n)) -> Type(n);
+    pair: [n, A: Type(n), B: A -> Type(n)](a: A) -> B(a) -> Self(A, B);
+    first: [n, A: Type(n), B: A -> Type(n)] -> Self(A, B) -> A;
+    first(pair(?a, ?b)) = a;
+    second: [n, A: Type(n), B: A -> Type(n)] -> (self: Self(A, B)) -> B(first(self));
+    second(pair(?a, ?b)) = b;
 }
 
 module S1 {
@@ -30,9 +33,9 @@ module Nat {
     succ: Self -> Self;
 
     max: Self -> Self -> Self;
-    max(x, zero) = x;
-    max(zero, x) = x;
-    max(succ(x), succ(y)) = succ(max(x, y));
+    max(?x, zero) = x;
+    max(zero, ?x) = x;
+    max(succ(?x), succ(?y)) = succ(max(x, y));
 }
 
 module Empty {
@@ -45,7 +48,7 @@ module Bad {
     bad: (Self -> Empty) -> Self;
 
     bad-is-false: Self -> Empty;
-    bad-is-false(bad(f)) = f(bad(f));
+    bad-is-false(bad(?f)) = f(bad(f));
 
     bad-is-true: Self = bad(bad-is-false);
 

@@ -1,5 +1,22 @@
 embed: string -> Array(u8);
 
+module Level {
+    Self: Type(0);
+    zero: Self;
+    succ: Self -> Self;
+    lim: (Nat -> Self) -> Self;
+
+    priv omega-fn: Nat -> Self;
+    omega-fn(.zero) = zero;
+    omega-fn(.succ(?x)) = succ(omega-fn(x));
+    omega = lim(omega-fn);
+
+    plus: Self -> Self -> Self;
+    plus(?a, zero) = a;
+    plus(?a, succ(?x)) = succ(plus(a, x));
+    plus(?a, lim(?f)) = lim(\x plus(a, f(x)));
+}
+
 module bool {
     bool: Type(0);
     true: bool;

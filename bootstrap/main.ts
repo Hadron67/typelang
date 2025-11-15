@@ -14,7 +14,18 @@ async function run(entry: string) {
         for (const line of parseResult.value.dump(reg)) {
             console.log(line);
         }
-        const typeCheck = checkTypes(reg, builtins, parseResult.value, true);
+        const typeCheck = checkTypes(reg, builtins, parseResult.value, {
+            info(msg) {
+                const l = msg();
+                if (Array.isArray(l)) {
+                    for (const line of l) {
+                        console.log(line);
+                    }
+                } else {
+                    console.log(l);
+                }
+            }
+        });
         if (typeCheck !== null) {
             for (const line of renderTypeCheckResult(typeCheck)) {
                 console.log(line);
