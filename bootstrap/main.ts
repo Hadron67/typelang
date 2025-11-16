@@ -29,7 +29,7 @@ async function run(entry: string, logger: Logger) {
     const parseResult = parseAndIrgen(builtins, builtins.getInitialScope(), file, 0 as FileId);
     if (parseResult.isLeft) {
         logger.info(() => parseResult.value.dump(reg));
-        const typeCheck = checkTypes(reg, builtins, parseResult.value, NO_LOG);
+        const typeCheck = checkTypes(reg, builtins, parseResult.value, logger);
         if (typeCheck !== null) {
             for (const line of renderTypeCheckResult(typeCheck)) {
                 console.log(line);

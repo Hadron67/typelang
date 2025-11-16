@@ -104,6 +104,7 @@ export interface UnknownExpression {
     readonly isPattern: boolean;
     readonly index: number;
     readonly type: Expression;
+    readonly inScopeVariables: Set<Symbol>;
     value?: Expression;
 }
 
@@ -309,7 +310,7 @@ export class SymbolRegistry {
         }
     }
     emitUnknown(type: Expression, isPattern: boolean): UnknownExpression {
-        const ret: UnknownExpression = {kind: ExpressionKind.UNKNOWN, isPattern, index: this.unknowns.length, type};
+        const ret: UnknownExpression = {kind: ExpressionKind.UNKNOWN, isPattern, index: this.unknowns.length, inScopeVariables: new Set(), type};
         this.unknowns.push(ret);
         return ret;
     }
@@ -509,6 +510,15 @@ export function unwrapUnknown(expr: Expression) {
         expr = expr.value;
     }
     return expr;
+}
+
+export function markInScopeVariable(expr: Expression, v: Symbol) {
+    mapExpression(expr, (expr, info) => {
+        if (expr.kind === ExpressionKind.UNKNOWN) {
+            expr.inScopeVariables.add(v);
+        }
+        info.emit(expr);
+    });
 }
 
 export function inputForm(registry: SymbolRegistry, expr: Expression) {
@@ -933,12 +943,23 @@ export function countArgs(expr: Expression) {
     return ret;
 }
 
+function checkFnTypeReady(expr: FnTypeExpression) {
+    if (expr.arg !== void 0) {
+        const arg = expr.arg.symbol;
+        return freeQ(expr.outputType, expr => expr.kind === ExpressionKind.UNKNOWN && expr.inScopeVariables.has(arg));
+    }
+    return true;
+}
+
 function checkFnTypeColor(expr: Expression, color: number) {
     expr = unwrapUnknown(expr);
     while (expr.kind === ExpressionKind.FN_TYPE && expr.color !== color) {
+        if (!checkFnTypeReady(expr)) {
+            return false;
+        }
         expr = unwrapUnknown(expr.outputType);
     }
-    return expr.kind === ExpressionKind.FN_TYPE;
+    return expr.kind === ExpressionKind.FN_TYPE && checkFnTypeReady(expr);
 }
 
 export interface TypeCheckResult {
@@ -981,6 +1002,20 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
 
     function typeOfExpression0(expr: Expression) {
         return typeOfExpression(expr, tempRegistry, builtins);
+    }
+
+    function pollHIRCompleteDone(hirReg: HIRReg) {
+        const resolved = hirResolvedData[hirReg];
+        if (!resolved.noEqualConstraints) {
+            return false;
+        }
+        for (const dep of hirDependencies[hirReg]) {
+            if (!hirResolvedData[dep].completeDone) {
+                return false;
+            }
+        }
+        resolved.completeDone = true;
+        return true;
     }
 
     function pollHIR(hirReg: HIRReg): boolean {
@@ -1093,13 +1128,16 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
     function pollFnType(source: HIRReg, value: HIRFnType, resolved: HIRResolvedData): boolean {
         if (resolved.value === void 0) {
             const inputType = hirResolvedData[value.inputType].value;
-            if (inputType === void 0 || !hirResolvedData[value.outputType].completeDone) return false;
-            let outputType = hirResolvedData[value.outputType].value ?? panic();
+            let outputType = hirResolvedData[value.outputType].value;
+            if (inputType === void 0 || outputType === void 0) return false;
             let arg: SymbolExpression | undefined = void 0;
             if (value.arg !== void 0) {
                 const a = hirResolvedData[value.arg].value;
                 if (a === void 0 || a.kind !== ExpressionKind.SYMBOL) return false;
                 arg = a;
+            }
+            if (arg !== void 0) {
+                markInScopeVariable(outputType, arg.symbol);
             }
             const inputLevel = tempRegistry.emitUnknown(se(builtins.levelType), false);
             const outputLevel = tempRegistry.emitUnknown(se(builtins.levelType), false);
@@ -1115,14 +1153,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
             };
             return true;
         }
-        if (!resolved.completeDone) {
-            if (hirResolvedData[value.inputType].completeDone && hirResolvedData[value.outputType].completeDone && resolved.noEqualConstraints) {
-                resolved.completeDone = true;
-                return true;
-            }
-            return false;
-        }
-        panic();
+        return pollHIRCompleteDone(source);
     }
 
     function pollCallIn(source: HIRReg, fn: Expression, fnType: Expression, argReg: HIRReg, color: number, isPattern: boolean): Expression | null {
@@ -1178,6 +1209,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
 
     function pollCall(source: HIRReg, value: HIRCall, resolved: HIRResolvedData): boolean {
         if (resolved.value === void 0) {
+            assert(resolved.value === void 0);
             let fn = hirResolvedData[value.fn].value;
             if (fn === void 0) {
                 return false;
@@ -1193,18 +1225,10 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
                 return false;
             }
         }
-        if (!resolved.completeDone) {
-            if (resolved.noEqualConstraints && hirResolvedData[value.fn].completeDone && hirResolvedData[value.arg].completeDone) {
-                resolved.completeDone = true;
-                return true;
-            }
-            return false;
-        }
-        panic();
+        return pollHIRCompleteDone(source);
     }
 
     function pollMemberAccess(source: HIRReg, value: HIRMemberAccess, resolved: HIRResolvedData) {
-        let ret = false;
         if (resolved.value === void 0) {
             let lhs = hirResolvedData[value.lhs].value;
             if (lhs !== void 0) {
@@ -1213,7 +1237,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
                     const entry = tempRegistry.getSymbolEntry(lhs.symbol);
                     if (entry.subSymbols !== void 0 && entry.subSymbols.has(value.name)) {
                         resolved.value = se(entry.subSymbols.get(value.name)!);
-                        ret = true;
+                        return true;
                     }
                 }
                 let lhsType = unwrapUnknown(typeOfExpression0(lhs));
@@ -1224,18 +1248,12 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
                     const entry = tempRegistry.getSymbolEntry(lhsType.symbol);
                     if (entry.subSymbols !== void 0 && entry.subSymbols.has(value.name)) {
                         const s = entry.subSymbols.get(value.name)!;
-
+                        panic();
                     }
                 }
             }
         }
-        if (!resolved.completeDone) {
-            if (hirResolvedData[value.lhs].completeDone) {
-                resolved.completeDone = true;
-                return true;
-            }
-        }
-        return ret;
+        return pollHIRCompleteDone(source);
     }
 
     function pollLambda(source: HIRReg, value: HIRLambda, resolved: HIRResolvedData): boolean {
@@ -1295,14 +1313,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
             // };
             ret = true;
         }
-        if (!resolved.completeDone) {
-            if (resolved.noEqualConstraints) {
-                resolved.completeDone = true;
-                return true;
-            }
-            return ret;
-        }
-        panic();
+        return pollHIRCompleteDone(source);
     }
 
     function evaluate(expr: Expression) {
@@ -1463,6 +1474,10 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
                     expr1 = expr2;
                     expr2 = t;
                 }
+            }
+            if (!freeQ(expr2, expr => expr === expr1)) {
+                logger.info(() => `rejecting unknown assign ${inputForm(tempRegistry, expr1)} = ${inputForm(tempRegistry, expr2)}`);
+                return false;
             }
             addEqualConstraint(expr1.type, typeOfExpression0(expr2), con.source);
             expr1.value = expr2;
@@ -1721,8 +1736,8 @@ export class Evaluator {
                     self.doActions(self._evaluate(expr.fn), self._evaluate(expr.arg), self => {
                         const arg = self.stack.pop()!;
                         const fn = self.stack.pop()!;
-                        if (fn.kind === ExpressionKind.LAMBDA && this.expandLambda) {
-                            if (fn.arg !== void 0) {
+                        if (fn.kind === ExpressionKind.LAMBDA) {
+                            if (fn.arg !== void 0 && freeQ(fn.body, expr => expr.kind === ExpressionKind.UNKNOWN && expr.inScopeVariables.has(fn.arg!.symbol))) {
                                 self.doActions(self._evaluate(replaceOneSymbol(fn.body, fn.arg.symbol, arg)));
                             } else {
                                 self.stack.push(fn.body);
