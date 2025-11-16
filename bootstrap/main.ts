@@ -21,26 +21,21 @@ const NO_LOG: Logger = {
     info() {},
 };
 
-async function run(entry: string) {
+async function run(entry: string, logger: Logger) {
     const file = await readFile(entry, 'utf-8');
     const lines = file.split('\n').map(e => e + '\n');
     const reg = new SymbolRegistry(null);
     const builtins = new BuiltinSymbols(reg);
     const parseResult = parseAndIrgen(builtins, builtins.getInitialScope(), file, 0 as FileId);
     if (parseResult.isLeft) {
-        console.log('hir:');
-        for (const line of parseResult.value.dump(reg)) {
-            console.log(line);
-        }
-        const typeCheck = checkTypes(reg, builtins, parseResult.value, VERBOSE);
+        logger.info(() => parseResult.value.dump(reg));
+        const typeCheck = checkTypes(reg, builtins, parseResult.value, NO_LOG);
         if (typeCheck !== null) {
             for (const line of renderTypeCheckResult(typeCheck)) {
                 console.log(line);
             }
         } else {
-            for (const line of reg.dump()) {
-                console.log(line);
-            }
+            logger.info(() => reg.dump());
         }
     } else {
         for (const msg of parseResult.value) {
@@ -51,4 +46,4 @@ async function run(entry: string) {
     }
 }
 
-run(process.argv[2]);
+run(process.argv[2], NO_LOG);

@@ -131,6 +131,7 @@ export const enum AstKind {
     CALL,
     SUBSCRIPT,
     LAMBDA,
+    TYPED_LAMBDA,
     BINARY,
     STRUCT_LITERAL,
     MEMBER_ACCESS,
@@ -284,8 +285,12 @@ export interface AstLambda extends SourceRange {
     readonly kind: AstKind.LAMBDA;
     readonly body: Ast;
     readonly arg: AstIdentifier;
-    readonly color?: number;
-    readonly type?: Ast;
+}
+
+export interface AstTypedLambda extends SourceRange {
+    readonly kind: AstKind.TYPED_LAMBDA;
+    readonly body: Ast;
+    readonly args: AstFnTypeArgList;
 }
 
 export interface AstBinary extends SourceRange {
@@ -374,7 +379,12 @@ export interface ParenthExpressionItem {
 export interface SourceRangeMessage extends SourceRange {
     readonly msg: string;
     readonly notes?: SourceRangeMessage[];
-};
+}
+
+export interface SourceRangeOptMessage {
+    readonly msg: string;
+    readonly loc?: SourceRange;
+}
 
 export function asSourceRange(r: SourceRange): SourceRange {
     return {start: r.start, length: r.length, file: r.file};
@@ -424,6 +434,16 @@ export function renderSourceMessage(msg: SourceRangeMessage, fileProvider: (f: F
     return [`${fname}:${loc[0] + 1}:${loc[1] + 1}: ${msg.msg}`, ...renderMarkedSource(lines, msg, '   |')];
 }
 
+
+export function renderSourceMessageOpt(msg: SourceRangeOptMessage, fileProvider: (f: FileId) => [string, string[]]) {
+    if (msg.loc !== void 0) {
+        const [fname, lines] = fileProvider(msg.loc.file);
+        const loc = sourceLocationToPosition(lines, msg.loc.start);
+        return [`${fname}:${loc[0] + 1}:${loc[1] + 1}: ${msg.msg}`, ...renderMarkedSource(lines, msg.loc, '   |')];
+    } else {
+        return [msg.msg];
+    }
+}
 function isWhitespace(ch: number) {
     return ch === CCODE_CR || ch === CCODE_LF || ch === CCODE_SPACE || ch === CCODE_TAB;
 }

@@ -75,6 +75,8 @@ export interface HIRLambda {
     readonly kind: HIRKind.LAMBDA;
     readonly arg?: HIRReg;
     readonly body: HIRReg;
+    readonly color?: number;
+    readonly argType?: HIRReg;
 }
 
 export interface HIRMemberAccess {
@@ -303,7 +305,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
             case AstKind.LAMBDA: {
                 let arg: HIRReg | undefined = void 0;
                 if (expr.arg.name !== '_') {
-                    const arg = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE | SymbolFlags.MAY_CONTAINS_LOCAL}, expr.arg);
+                    const arg = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE}, expr.arg);
                     const newScope = new Map<string, HIRReg>();
                     newScope.set(expr.arg.name, arg);
                     scopes.push(newScope);
@@ -362,7 +364,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
             scopes.push(scope);
             for (const [arg, argType] of args.args) {
                 const inputType = argType !== void 0 ? genExpression(argType) : emitUnknown(void 0);
-                const argVar = hir.emit({kind: HIRKind.SYMBOL, name: arg.name, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE | SymbolFlags.MAY_CONTAINS_LOCAL, parent: null}, arg);
+                const argVar = hir.emit({kind: HIRKind.SYMBOL, name: arg.name, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE, parent: null}, arg);
                 hir.emit({kind: HIRKind.SYMBOL_TYPE, symbol: argVar, type: inputType}, void 0);
                 scope.set(arg.name, argVar);
                 fns.push({color, inputType, arg: argVar, loc: argType !== void 0 ? sourceRangeBetween(arg, argType) : asSourceRange(arg)});

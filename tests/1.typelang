@@ -23,6 +23,17 @@ module Eq {
     apd: [n, n', A: Type(n), B: A -> Type(n'), x: A, y](f: (x: A) -> B(x), p: Self(x, y)) -> Self(transport(p, f(x)), f(y));
     apd(?, refl(?)) = refl(_);
 
+    module lemma-2-1-4 {
+        l1: [n, A: Type(n), x: A, y](p: Eq(x, y)) -> Eq(p, concat(p, refl(y)));
+        l1(refl(?)) = refl(_);
+
+        l2-1: [n, A: Type(n), x: A, y](p: Eq(x, y)) -> Eq(concat(p, inv(p)), refl(x));
+        l2-1(refl(?)) = refl(_);
+
+        l2-2: [n, A: Type(n), x: A, y](p: Eq(x, y)) -> Eq(concat(inv(p), p), refl(y));
+        l2-2(refl(?)) = refl(_);
+    }
+
     lemma-2-3-8: [n, n', A: Type(n), B: Type(n'), x: A, y](f: A -> B, p: Self(x, y)) -> Self(apd(f, p), concat(transportconst(p, f(x)), ap(f, p)));
     lemma-2-3-8(?, refl(?)) = refl(_);
 
@@ -34,6 +45,8 @@ module Eq {
 
     lemma-2-3-11: [n, n1, n2, A: Type(n), P: A -> Type(n1), Q: A -> Type(n2), f: (x: A) -> P(x) -> Q(x), x: A, y](p: Self(x, y), u: P(x)) -> Self(transport(p, f(x, u)), f(y, transport(p, u)));
     lemma-2-3-11(refl(?), ?) = refl(_);
+
+    fnext: [n, A: Type(n), B: A -> Type(n), f: (x: A) -> B(x), g: (x: A) -> B(x)] -> ((x: A) -> Self(f(x), g(x))) -> Self(f, g);
 }
 
 module Sum {
@@ -49,6 +62,13 @@ module S1 {
     Self: Type(0);
     base: Self;
     loop: Eq(base, base);
+
+    module lemma-6-2-5 {
+        f: [n, A: Type(n), a: A](p: Eq(a, a)) -> S1 -> A;
+        f[?, ?, ?a](?p, base) = a;
+        f-eq: [n, A: Type(n), a: A](p: Eq(a, a)) -> Eq(Eq.apd(f(p), loop), Eq.concat(Eq.transportconst(loop, a), p));
+        col: [n, A: Type(n), a: A](p: Eq(a, a)) -> Eq(Eq.ap(f(p), loop), p);
+    }
 }
 
 module Nat {
@@ -60,6 +80,19 @@ module Nat {
     max(?x, zero) = x;
     max(zero, ?x) = x;
     max(succ(?x), succ(?y)) = succ(max(x, y));
+
+    plus: Self -> Self -> Self;
+    plus(?x, zero) = x;
+    plus(?x, succ(?y)) = succ(plus(x, y));
+
+    times: Self -> Self -> Self;
+    times(?x, zero) = zero;
+    times(?x, succ(?y)) = plus(times(x, y), x);
+
+    two = succ(succ(zero));
+    three = succ(two);
+    four = succ(three);
+    _: Eq(plus(two, two), four) = Eq.refl(_);
 }
 
 module Empty {
@@ -77,4 +110,10 @@ module Bad {
     bad-is-true: Self = bad(bad-is-false);
 
     boom: Empty = bad-is-false(bad-is-true);
+}
+
+module List {
+    Self: [n] -> Type(n) -> Type(n);
+    empty: [n](T: Type(n)) -> Self(T);
+    append: [n, T: Type(n)] -> Self(T) -> T -> Self(T);
 }
