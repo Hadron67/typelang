@@ -1,6 +1,6 @@
-import { generateHIRDependencies, HIRCall, HIRFnType, HIRHost, HIRKind, HIRLambda, HIRReg, HIRRegData, HIRSymbolRule, visitHIR } from "./irgen";
-import { StructVariant, SourceRange, asSourceRange, SourceRangeMessage } from "./parser";
-import { assert, constArray, IndexedMap, Logger, makeArray, Mutable, panic, popReversed, pushReversed, Timer } from "./util";
+import { HIRCall, HIRFnType, HIRHost, HIRKind, HIRLambda, HIRReg, HIRSymbolRule } from "./irgen";
+import { SourceRange } from "./parser";
+import { assert, constArray, Logger, makeArray, Mutable, panic, popReversed, pushReversed, Timer } from "./util";
 
 export const enum ExpressionKind {
     SYMBOL,
@@ -10,6 +10,7 @@ export const enum ExpressionKind {
     LAMBDA,
     CALL,
     FN_TYPE,
+    UNKNOWN,
 }
 
 export type Symbol = number & { __marker: Symbol };
@@ -47,6 +48,7 @@ export type Expression =
     | FnTypeExpression
     | CallExpression
     | UniverseExpression
+    | UnknownExpression
 ;
 
 export interface SymbolExpression {
@@ -100,6 +102,14 @@ export interface UniverseExpression {
     readonly loc?: SourceRange;
 }
 
+export interface UnknownExpression {
+    readonly kind: ExpressionKind.UNKNOWN;
+    readonly isPattern: boolean;
+    readonly index: number;
+    readonly type: Expression;
+    value?: Expression;
+}
+
 export interface ExpressionWithReplaces {
     readonly expr: Expression;
     readonly replaces: Map<Symbol, Expression>;
@@ -133,13 +143,13 @@ export interface TypeCheckDiagnosticUnequal {
 
 export interface TypeCheckDiagnosticUninferred {
     readonly kind: TypeCheckDiagnosticKind.UNINFERRED;
-    readonly symbol: Symbol;
+    readonly expr: UnknownExpression;
 }
 
 export function renderTypeCheckDiagnostic(d: TypeCheckDiagnostic, reg: SymbolRegistry) {
     switch (d.kind) {
         case TypeCheckDiagnosticKind.UNEQUAL: return [`unequal expressions ${inputForm(reg, d.con.expr1)} and ${inputForm(reg, d.con.expr2)}`];
-        case TypeCheckDiagnosticKind.UNINFERRED: return [`uninferred symbol ${reg.getSymbolDisplayName(d.symbol)}`];
+        case TypeCheckDiagnosticKind.UNINFERRED: return [`uninferred symbol ${inputForm(reg, d.expr)}`];
     }
 }
 
@@ -241,6 +251,7 @@ export class BuiltinSymbols {
 }
 
 export class SymbolRegistry {
+    readonly unknowns: UnknownExpression[] = [];
     private readonly symbolOffset: number;
     private readonly symbols: SymbolData[] = [];
     private readonly removedSymbols: Symbol[] = [];
@@ -300,10 +311,10 @@ export class SymbolRegistry {
             }
         }
     }
-    emitUnknown(type: Expression, isVariable: boolean): SymbolExpression {
-        let f = isVariable ? SymbolFlags.IS_VARIABLE : SymbolFlags.MUST_HAVE_VALUE;
-        const ret = this.emitSymbol({type, parent: null, flags: f | SymbolFlags.ALLOW_ASSIGNMENT | SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.AUTO_SUBSTITUTE | SymbolFlags.AUTO_REMOVE | SymbolFlags.MAY_CONTAINS_LOCAL});
-        return se(ret);
+    emitUnknown(type: Expression, isPattern: boolean): UnknownExpression {
+        const ret: UnknownExpression = {kind: ExpressionKind.UNKNOWN, isPattern, index: this.unknowns.length, type};
+        this.unknowns.push(ret);
+        return ret;
     }
     emitUnknownType(builtins: BuiltinSymbols) {
         return this.emitUnknown({kind: ExpressionKind.UNIVERSE, level: this.emitUnknown(se(builtins.levelType), false)}, false);
@@ -315,18 +326,6 @@ export class SymbolRegistry {
             this.symbols.push(d);
         }
         reg.symbols.length = 0;
-    }
-    substituteTemps(expr: Expression) {
-        return mapExpression(expr, (expr, info) => {
-            if (expr.kind === ExpressionKind.SYMBOL) {
-                const entry = this.getSymbolEntry(expr.symbol);
-                if (0 !== (entry.flags & SymbolFlags.AUTO_SUBSTITUTE) && entry.value !== void 0) {
-                    info.rerun(entry.value);
-                    return;
-                }
-            }
-            info.emit(expr);
-        }) ?? panic();
     }
     mapExpressionsOfSymbol(s: Symbol, mapper: (expr: Expression) => Expression) {
         let changed = false;
@@ -360,7 +359,7 @@ export class SymbolRegistry {
         return changed;
     }
     substituteAllTemps() {
-        return this.mapAllExpressions(expr => this.substituteTemps(expr));
+        return this.mapAllExpressions(expr => mapExpression(expr, (expr, info) => info.emit(expr)) ?? panic());
     }
     cleanupTemps() {
         const marked = constArray(false, this.symbols.length);
@@ -425,6 +424,7 @@ export class SymbolRegistry {
 }
 
 export function typeOfExpression(expr: Expression, reg: SymbolRegistry, builtins: BuiltinSymbols | undefined): Expression {
+    expr = unwrapUnknown(expr);
     switch (expr.kind) {
         case ExpressionKind.SYMBOL: {
             const entry = reg.getSymbolEntry(expr.symbol);
@@ -433,6 +433,7 @@ export function typeOfExpression(expr: Expression, reg: SymbolRegistry, builtins
             }
             return entry.type ?? se((builtins ?? panic()).untyped);
         }
+        case ExpressionKind.UNKNOWN: return expr.type;
         case ExpressionKind.CALL:
         case ExpressionKind.LAMBDA: return expr.type;
         case ExpressionKind.FN_TYPE: return {kind: ExpressionKind.UNIVERSE, level: expr.typeLevel};
@@ -457,10 +458,10 @@ function makeSucc(level: Expression, builtins: BuiltinSymbols): Expression {
 
 export function collectFnArgs(expr: CallExpression): [Expression, Expression[]] {
     const args: Expression[] = [];
-    let expr0: Expression = expr;
+    let expr0: Expression = unwrapUnknown(expr);
     while (expr0.kind === ExpressionKind.CALL) {
         args.unshift(expr0.arg);
-        expr0 = expr0.fn;
+        expr0 = unwrapUnknown(expr0.fn);
     }
     assert(args.length > 0);
     return [expr0, args];
@@ -476,6 +477,7 @@ export function getFn(expr: CallExpression) {
 
 export function collectFnTypeColors(expr: Expression) {
     const colors: number[] = [];
+    expr = unwrapUnknown(expr);
     while (expr.kind === ExpressionKind.FN_TYPE) {
         colors.push(expr.color);
         expr = expr.outputType;
@@ -505,21 +507,37 @@ export function isValidPattern(reg: SymbolRegistry, expr: Expression) {
     }
 }
 
+export function unwrapUnknown(expr: Expression) {
+    while (expr.kind === ExpressionKind.UNKNOWN && expr.value !== void 0) {
+        expr = expr.value;
+    }
+    return expr;
+}
+
 export function inputForm(registry: SymbolRegistry, expr: Expression) {
     const stack: string[] = [];
     const todo: (Expression | ((stack: string[]) => void))[] = [expr];
     while (todo.length > 0) {
-        const t = todo.pop()!;
+        let t = todo.pop()!;
         if (typeof t === 'function') {
             t(stack);
             continue;
         }
+        t = unwrapUnknown(t);
         switch (t.kind) {
             case ExpressionKind.SYMBOL: stack.push(registry.getSymbolDisplayName(t.symbol)); break;
+            case ExpressionKind.UNKNOWN: {
+                if (t.value !== void 0) {
+                    todo.push(t.value);
+                } else {
+                    stack.push((t.isPattern ? '?#' : '?') + t.index.toString());
+                }
+                break;
+            }
             case ExpressionKind.CALL: {
                 const [fn, args] = collectFnArgs(t);
                 const colors = collectFnTypeColors(typeOfExpression(fn, registry, void 0));
-                const needParenth = fn.kind !== ExpressionKind.SYMBOL;
+                const needParenth = fn.kind !== ExpressionKind.SYMBOL && fn.kind !== ExpressionKind.UNKNOWN;
                 const length = args.length;
                 todo.push(stack => {
                     const args: string[] = [];
@@ -605,14 +623,9 @@ export function inputForm(registry: SymbolRegistry, expr: Expression) {
 
 export function containsUninferedTemps(reg: SymbolRegistry, expr: Expression) {
     return null === mapExpression(expr, (expr, info) => {
-        if (expr.kind === ExpressionKind.SYMBOL) {
-            const entry = reg.getSymbolEntry(expr.symbol);
-            const flags = entry.flags;
-            const mcl = 0 !== (flags & SymbolFlags.MAY_CONTAINS_LOCAL);
-            if (mcl && 0 !== (entry.flags & (SymbolFlags.ALLOW_ASSIGNMENT | SymbolFlags.ALLOW_DOWN_VALUE))) {
-                info.terminate();
-                return;
-            }
+        if (expr.kind === ExpressionKind.UNKNOWN && expr.value === void 0) {
+            info.terminate();
+            return;
         }
         info.emit(expr);
     });
@@ -633,6 +646,11 @@ export interface MapperInfo {
     terminate(): void;
     rerun(expr: Expression): void;
     emit(expr: Expression): void;
+}
+
+// main purpose of this function is removing unknown expressions
+export function copyExpression(expr: Expression) {
+    return mapExpression(expr, (expr, info) => info.emit(expr)) ?? panic();
 }
 
 export function mapExpression(expr: Expression, mapper: (expr: Expression, info: MapperInfo) => void) {
@@ -716,7 +734,7 @@ export function mapExpression(expr: Expression, mapper: (expr: Expression, info:
                         assert(a.kind === ExpressionKind.SYMBOL);
                         arg = a;
                     }
-                    if (body !== t.body || type !== t.type) {
+                    if (body !== t.body || type !== t.type || arg !== t.arg) {
                         return {kind: ExpressionKind.LAMBDA, arg, body, type, loc: t.loc};
                     } else {
                         return t;
@@ -736,6 +754,17 @@ export function mapExpression(expr: Expression, mapper: (expr: Expression, info:
                         return t;
                     }
                 }, t.level);
+                break;
+            }
+            case ExpressionKind.UNKNOWN: {
+                if (t.value !== void 0) {
+                    todo.push(t.value);
+                } else {
+                    mapper(t, info);
+                    if (terminated) {
+                        return null;
+                    }
+                }
                 break;
             }
             default: panic();
@@ -778,8 +807,8 @@ export function freeQ(expr: Expression, symbol: Symbol) {
 export function sameQ(expr1: Expression, expr2: Expression) {
     const todo = [expr1, expr2];
     while (todo.length > 0) {
-        const expr2 = todo.pop()!;
-        const expr1 = todo.pop()!;
+        const expr2 = unwrapUnknown(todo.pop()!);
+        const expr1 = unwrapUnknown(todo.pop()!);
         switch (expr1.kind) {
             case ExpressionKind.SYMBOL:
                 if (expr2.kind !== ExpressionKind.SYMBOL || expr2.symbol !== expr1.symbol) {
@@ -831,6 +860,13 @@ export function sameQ(expr1: Expression, expr2: Expression) {
                 todo.push(expr1.level, expr2.level);
                 break;
             }
+            case ExpressionKind.UNKNOWN: {
+                if (expr1 !== expr2) {
+                    return false;
+                }
+                break;
+            }
+            default: panic();
         }
     }
     return true;
@@ -924,6 +960,9 @@ interface HIRResolvedData {
     noEqualConstraints: boolean;
     type?: Expression;
     value?: Expression;
+
+    pendingDownValueLhs?: Expression;
+    pendingDownValueRhs?: Expression;
 }
 
 interface EqualConstraint {
@@ -938,8 +977,6 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
     const tempRegistry = new SymbolRegistry(registry);
     const equalConstraints: EqualConstraint[] = [];
     const diagnostics: TypeCheckDiagnostic[] = [];
-    const doneSymbols = new Set<Symbol>();
-    const hirDependencies = generateHIRDependencies(hir);
 
     run();
     return diagnostics.length > 0 ? {tempRegistry, diagnostics} : null;
@@ -1030,6 +1067,24 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
                 return true;
             }
             case HIRKind.SYMBOL_RULE: return pollDownValue(hirReg, value, resolved);
+            case HIRKind.UNKNOWN: {
+                let ret = false;
+                if (resolved.value === void 0) {
+                    if (value.type !== void 0 && hirResolvedData[value.type].value === void 0) {
+                        return false;
+                    }
+                    const type = value.type !== void 0 ? hirResolvedData[value.type].value : void 0;
+                    resolved.value = tempRegistry.emitUnknown(type ?? tempRegistry.emitUnknownType(builtins), false);
+                    ret = true;
+                }
+                if (!resolved.completeDone) {
+                    if (value.type === void 0 || hirResolvedData[value.type].completeDone) {
+                        resolved.completeDone = true;
+                        return true;
+                    }
+                }
+                return ret;
+            }
             case HIRKind.MEMBER_ACCESS: {
                 let ret = false;
                 if (resolved.value === void 0) {
@@ -1090,66 +1145,15 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         panic();
     }
 
-    function pollCallIn(source: HIRReg, hirArg: HIRReg, color: number, isPattern: boolean, fn: Expression, arg: Expression): Expression | null {
-        let fnType = typeOfExpression0(fn);
-
-        if (arg === void 0) {
-            const argEntry = hirResolvedData[hirArg];
-            if (argEntry.type === void 0) {
-                if (fn.kind === ExpressionKind.SYMBOL && fn.symbol === builtins.type) {
-                    argEntry.type = se(builtins.levelType);
-                } else if (fnType.kind === ExpressionKind.FN_TYPE) {
-                    argEntry.type = fnType.inputType;
-                }
-            }
-            return null;
-        }
-        const argType = typeOfExpression0(arg);
-
-        if (fn.kind === ExpressionKind.SYMBOL && fn.symbol === builtins.type) {
-            addEqualConstraint(argType, se(builtins.levelType), source);
-            return {kind: ExpressionKind.UNIVERSE, level: arg};
-        }
-
-        if (fnType.kind !== ExpressionKind.FN_TYPE) {
-            return null;
-        }
-        if (!checkFnTypeColor(fnType, color)) {
-            return null;
-        }
-        let ret = fn;
-        while (fnType.kind === ExpressionKind.FN_TYPE && color !== fnType.color) {
-            const fnArg = fnType.arg;
-            const temp = tempRegistry.emitUnknown(fnType.inputType, isPattern);
-            let nextType: Expression = fnType.outputType;
-            if (fnArg !== void 0) {
-                nextType = replaceOneSymbol(nextType, fnArg.symbol, temp);
-            }
-            ret = {kind: ExpressionKind.CALL, fn: ret, arg: temp, type: nextType};
-            fnType = nextType;
-        }
-        assert(fnType.kind === ExpressionKind.FN_TYPE);
-        addEqualConstraint(fnType.inputType, argType, source);
-        let retType = fnType.outputType;
-        if (fnType.arg !== void 0) {
-            retType = replaceOneSymbol(retType, fnType.arg.symbol, arg);
-        }
-        return {
-            kind: ExpressionKind.CALL,
-            fn: ret,
-            arg,
-            type: retType,
-        };
-    }
-
     function pollCall(source: HIRReg, value: HIRCall, resolved: HIRResolvedData): boolean {
         if (resolved.value === void 0) {
-            const fn = hirResolvedData[value.fn].value;
+            let fn = hirResolvedData[value.fn].value;
             const arg = hirResolvedData[value.arg].value;
             if (fn === void 0) {
                 return false;
             }
-            let fnType = typeOfExpression0(fn);
+            fn = unwrapUnknown(fn);
+            let fnType = unwrapUnknown(typeOfExpression0(fn));
 
             if (arg === void 0) {
                 const argEntry = hirResolvedData[value.arg];
@@ -1185,7 +1189,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
                     nextType = replaceOneSymbol(nextType, fnArg.symbol, temp);
                 }
                 ret = {kind: ExpressionKind.CALL, fn: ret, arg: temp, type: nextType};
-                fnType = nextType;
+                fnType = unwrapUnknown(nextType);
             }
             assert(fnType.kind === ExpressionKind.FN_TYPE);
             addEqualConstraint(fnType.inputType, argType, source);
@@ -1285,8 +1289,9 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
     }
 
     function addEqualConstraint(expr1: Expression, expr2: Expression, source: HIRReg) {
-        logger.info(() => `add equal constraint ${inputForm(tempRegistry, expr1)} === ${inputForm(tempRegistry, expr2)}， with ${inputForm(tempRegistry, typeOfExpression0(expr1))}`);
+        logger.info(() => `add equal constraint ${inputForm(tempRegistry, expr1)} === ${inputForm(tempRegistry, expr2)}, source: %${source}`);
         equalConstraints.push({expr1, expr2, source});
+        hirResolvedData[source].noEqualConstraints = false;
     }
 
     function setSymbolValue(symbol: Symbol, value: Expression, source: HIRReg) {
@@ -1319,6 +1324,20 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         return true;
     }
 
+    function convertRule(lhs: Expression, rhs: Expression) {
+        lhs = mapExpression(lhs, (expr, info) => {
+            if (expr.kind === ExpressionKind.UNKNOWN && expr.isPattern) {
+                assert(expr.value === void 0);
+                const s = tempRegistry.emitSymbol({parent: null, type: expr.type, flags: SymbolFlags.IS_VARIABLE});
+                expr.value = se(s);
+                info.emit(expr.value);
+                return;
+            }
+            info.emit(expr);
+        }) ?? panic();
+        return [lhs, copyExpression(rhs)];
+    }
+
     function pollDownValue(source: HIRReg, value: HIRSymbolRule, resolved: HIRResolvedData): boolean {
         const {lhs, rhs} = value.rule;
         if (resolved.value === void 0) {
@@ -1329,34 +1348,33 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
             if (!hirResolvedData[lhs].completeDone || !hirResolvedData[rhs].completeDone) {
                 return false;
             }
-            const lhsExpr = hirResolvedData[lhs].value ?? panic();
-            const rhsExpr = hirResolvedData[rhs].value ?? panic();
-            assert(lhsExpr.kind === ExpressionKind.CALL);
-            const [fn, args] = collectFnArgs(lhsExpr);
-            assert(fn.kind === ExpressionKind.SYMBOL);
-            const entry = tempRegistry.getSymbolEntry(fn.symbol);
-            if (!tempRegistry.isLocalSymbol(fn.symbol) || 0 === (entry.flags & SymbolFlags.ALLOW_DOWN_VALUE)) {
-                return false;
-            }
-            let target: [Expression, Expression][];
-            if (!value.isUpValue) {
-                if (entry.downValues === void 0) {
-                    entry.downValues = [];
-                }
-                target = entry.downValues;
-            } else {
-                if (entry.upValues === void 0) {
-                    entry.upValues = [];
-                }
-                target = entry.upValues;
-            }
-            addEqualConstraint(typeOfExpression0(lhsExpr), typeOfExpression0(rhsExpr), source);
-            target.push([lhsExpr, rhsExpr]);
+            addEqualConstraint(typeOfExpression0(hirResolvedData[lhs].value ?? panic()), typeOfExpression0(hirResolvedData[rhs].value ?? panic()), source);
             resolved.value = se(builtins.unit);
             return true;
         }
         if (!resolved.completeDone) {
             if (resolved.noEqualConstraints) {
+                const [lhsExpr, rhsExpr] = convertRule(hirResolvedData[lhs].value ?? panic(), hirResolvedData[rhs].value ?? panic());
+                assert(lhsExpr.kind === ExpressionKind.CALL);
+                const fn = getFn(lhsExpr);
+                assert(fn.kind === ExpressionKind.SYMBOL);
+                const entry = tempRegistry.getSymbolEntry(fn.symbol);
+                if (!tempRegistry.isLocalSymbol(fn.symbol) || 0 === (entry.flags & SymbolFlags.ALLOW_DOWN_VALUE)) {
+                    return false;
+                }
+                let target: [Expression, Expression][];
+                if (!value.isUpValue) {
+                    if (entry.downValues === void 0) {
+                        entry.downValues = [];
+                    }
+                    target = entry.downValues;
+                } else {
+                    if (entry.upValues === void 0) {
+                        entry.upValues = [];
+                    }
+                    target = entry.upValues;
+                }
+                target.push([lhsExpr, rhsExpr]);
                 resolved.completeDone = true;
                 return true;
             }
@@ -1381,26 +1399,15 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         return mhv1 || !mhv2;
     }
 
-    function callExprOrder(expr1: CallExpression, expr2: CallExpression) {
-        const fn1 = expr1.fn;
-        const fn2 = expr2.fn;
-        const arg1 = expr1.arg;
-        const arg2 = expr2.arg;
-        if (fn1.kind === ExpressionKind.SYMBOL && fn2.kind === ExpressionKind.SYMBOL) {
-            if (!tempRegistry.isVariable(fn1.symbol) && tempRegistry.isVariable(fn2.symbol)) {
-                return false;
-            }
-        }
-    }
-
     function makeLambda(body: Expression, arg: SymbolExpression, type: Expression): Expression {
         if (body.kind === ExpressionKind.CALL && body.arg.kind === ExpressionKind.SYMBOL && body.arg.symbol === arg.symbol && freeQ(body.fn, arg.symbol)) {
             return body.fn;
         } else {
+            const newArg = freeQ(body, arg.symbol) ? void 0 : se(tempRegistry.emitSymbol({parent: null, type: typeOfExpression0(arg), flags: SymbolFlags.IS_VARIABLE}));
             return {
                 kind: ExpressionKind.LAMBDA,
-                arg,
-                body,
+                arg: newArg,
+                body: newArg !== void 0 ? replaceOneSymbol(body, arg.symbol, newArg) : body,
                 type,
             };
         }
@@ -1416,25 +1423,29 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
             logger.info(() => `evaluated expr: ${inputForm(tempRegistry, expr1)} === ${inputForm(tempRegistry, expr2)}`);
         }
         const changed = expr1 !== oldExpr1 || expr2 !== oldExpr2;
-        if (expr1.kind !== ExpressionKind.SYMBOL && expr2.kind === ExpressionKind.SYMBOL) {
+        if (expr1.kind !== ExpressionKind.UNKNOWN && expr2.kind === ExpressionKind.UNKNOWN) {
             const t = expr1;
             expr1 = expr2;
             expr2 = t;
         }
-        if (expr1.kind === ExpressionKind.SYMBOL) {
-            if (expr2.kind === ExpressionKind.SYMBOL) {
-                if (expr1.symbol === expr2.symbol) {
+        if (expr1.kind === ExpressionKind.UNKNOWN) {
+            assert(expr1.value === void 0);
+            if (expr2.kind === ExpressionKind.UNKNOWN) {
+                assert(expr2.value === void 0);
+                if (expr1 === expr2) {
                     return true;
                 }
-                if (!symbolAssignOrder(expr1.symbol, expr2.symbol)) {
-                    let t = expr1;
+                if (expr1.isPattern && !expr2.isPattern) {
+                    const t = expr1;
                     expr1 = expr2;
                     expr2 = t;
                 }
             }
-            if (setSymbolValue(expr1.symbol, expr2, con.source)) {
-                return true;
-            }
+            addEqualConstraint(expr1.type, typeOfExpression0(expr2), con.source);
+            expr1.value = expr2;
+            const {index, isPattern} = expr1;
+            logger.info(() => `setting unknown ?${isPattern ? '#' : ''}${index} = ${inputForm(tempRegistry, expr2)}`);
+            return true;
         }
         if (expr1.kind === ExpressionKind.UNIVERSE && expr2.kind === ExpressionKind.UNIVERSE) {
             addEqualConstraint(expr1.level, expr2.level, con.source);
@@ -1461,6 +1472,9 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
                 }
                 const [fn1, args1] = collectFnArgs(expr1);
                 const [fn2, args2] = collectFnArgs(expr2);
+                if (fn1.kind === ExpressionKind.UNKNOWN && fn1.index === 326 && args1[0].kind === ExpressionKind.UNKNOWN && args1[0].index === 325) {
+                    debugger;
+                }
                 if (fn1.kind === ExpressionKind.SYMBOL && fn2.kind === ExpressionKind.SYMBOL) {
                     if (args1.length === args2.length && fn1.symbol === fn2.symbol) {
                         const entry = tempRegistry.getSymbolEntry(fn1.symbol);
@@ -1544,7 +1558,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         logger.info(() => {
             const ret: string[] = [title + ': equal constraints:'];
             for (const con of equalConstraints) {
-                ret.push(`    ${inputForm(tempRegistry, con.expr1)} === ${inputForm(tempRegistry, con.expr2)}, source: ${con.source}`);
+                ret.push(`    ${inputForm(tempRegistry, con.expr1)} === ${inputForm(tempRegistry, con.expr2)}, source: %${con.source}`);
             }
             ret.push('end');
             return ret;
@@ -1582,17 +1596,6 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         }
     }
 
-    function substituesTempsInHIR() {
-        for (const data of hirResolvedData) {
-            if (data.type !== void 0) {
-                data.type = tempRegistry.substituteTemps(data.type);
-            }
-            if (data.value !== void 0) {
-                data.value = tempRegistry.substituteTemps(data.value);
-            }
-        }
-    }
-
     function iterate(fixedPoint: boolean) {
         let changed = false;
         let now = new Date();
@@ -1605,8 +1608,6 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         logger.info(() => `equal contraints took ${timer.elapsed()}ms`);
         if (changed) {
             updateNoEqualConstraintsMarker();
-            substituesTempsInHIR();
-            tempRegistry.substituteAllTemps();
             logger.info(() => `refresh took ${timer.elapsed()}ms`);
         }
         return changed;
@@ -1615,6 +1616,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
     function run() {
         let iterations = 0;
         let fixedIterations = 0;
+        const timer = new Timer();
         while (true) {
             logger.info(() => `iteration ${iterations}`);
             while (iterate(false)) {
@@ -1631,19 +1633,18 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         for (const con of equalConstraints) {
             diagnostics.push({kind: TypeCheckDiagnosticKind.UNEQUAL, con});
         }
-        tempRegistry.forEachLocalSymbol((symbol, entry) => {
-            if (0 !== (entry.flags & SymbolFlags.MUST_HAVE_VALUE) && entry.value === void 0 && (entry.downValues === void 0 || entry.downValues.length === 0)) {
-                diagnostics.push({kind: TypeCheckDiagnosticKind.UNINFERRED, symbol});
+        for (const expr of tempRegistry.unknowns) {
+            if (expr.value === void 0) {
+                diagnostics.push({kind: TypeCheckDiagnosticKind.UNINFERRED, expr});
             }
-        });
+        }
         if (diagnostics.length > 0) {
             logger.info(() => tempRegistry.dump());
             return;
         }
-        logger.info(() => `done in ${iterations} iterations and ${fixedIterations} fixed iterations`);
+        logger.info(() => `done in ${timer.elapsed()}ms, ${iterations} iterations and ${fixedIterations} fixed iterations`);
         registry.mergeFrom(tempRegistry);
         registry.substituteAllTemps();
-        registry.cleanupTemps();
     }
 }
 
@@ -1750,6 +1751,14 @@ export class Evaluator {
                             self.stack.push(expr);
                         }
                     });
+                    break;
+                }
+                case ExpressionKind.UNKNOWN: {
+                    if (expr.value !== void 0) {
+                        self.doActions(self._evaluate(expr.value));
+                    } else {
+                        self.stack.push(expr);
+                    }
                     break;
                 }
                 case ExpressionKind.NUMBER:

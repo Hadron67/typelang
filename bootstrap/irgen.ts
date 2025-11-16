@@ -1,6 +1,6 @@
-import { ExpressionKind, BuiltinSymbols, Expression, SymbolRegistry, inputForm, se, Symbol, SymbolFlags } from "./analyse";
-import { asSourceRange, Ast, AstBlock, AstCall, AstFnType, AstFnTypeArgList, AstIdentifier, AstKind, AstLet, AstModuelDecl, AstModule, FileId, parse, SourceRange, sourceRangeBetween, SourceRangeMessage } from "./parser";
-import { assert, Either, Mutable, panic } from "./util";
+import { ExpressionKind, BuiltinSymbols, Expression, SymbolRegistry, inputForm, se, SymbolFlags } from "./analyse";
+import { asSourceRange, Ast, AstCall, AstFnType, AstIdentifier, AstKind, FileId, parse, SourceRange, sourceRangeBetween, SourceRangeMessage } from "./parser";
+import { assert, Either, panic } from "./util";
 
 export const enum HIRKind {
     EXPR,
@@ -13,6 +13,7 @@ export const enum HIRKind {
     SYMBOL_TYPE,
     SYMBOL_ASSIGN,
     SYMBOL_RULE,
+    UNKNOWN,
 }
 
 export type HIRReg = number & { __marker: HIRReg };
@@ -28,6 +29,7 @@ export type HIRData =
     | HIRSymbolType
     | HIRSymbolAssignment
     | HIRSymbolRule
+    | HIRUnknown
 ;
 
 export interface DownValue {
@@ -112,6 +114,11 @@ export interface HIRSymbolRule {
     readonly rule: HIRRule;
 }
 
+export interface HIRUnknown {
+    readonly kind: HIRKind.UNKNOWN;
+    readonly type?: HIRReg;
+}
+
 export interface HIRRegData {
     readonly loc?: SourceRange;
     readonly value: HIRData;
@@ -157,6 +164,7 @@ export function dumpHIR(registry: SymbolRegistry, data: HIRData): string {
         case HIRKind.EXPR: return inputForm(registry, data.expr);
         case HIRKind.NUMBER: return data.value.toString();
         case HIRKind.MEMBER_ACCESS: return `%${data.lhs}.${data.name}`;
+        case HIRKind.UNKNOWN: return 'unknown' + (data.type !== void 0 ? ` %${data.type}` : '');
         case HIRKind.SYMBOL: return `symbol ${data.name ?? '<no name>'}${data.parent === null ? '' : `, parent = %${data.parent}`}`;
         case HIRKind.SYMBOL_TYPE: return `%${data.symbol}: %${data.type}`;
         case HIRKind.SYMBOL_ASSIGN: return `%${data.symbol} === %${data.value}`;
@@ -271,7 +279,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
                     }
                 }
                 if (name === '_') {
-                    return hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.MUST_HAVE_VALUE | SymbolFlags.AUTO_SUBSTITUTE | SymbolFlags.ALLOW_ASSIGNMENT | SymbolFlags.ALLOW_DEF_TYPE}, loc);
+                    return emitUnknown(void 0);
                 }
                 if (name === 'Self') {
                     assert(selfStack.length > 0);
@@ -342,11 +350,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
     }
 
     function emitUnknown(type: HIRReg | undefined) {
-        const ret = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.MUST_HAVE_VALUE | SymbolFlags.AUTO_SUBSTITUTE | SymbolFlags.ALLOW_ASSIGNMENT | SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.MAY_CONTAINS_LOCAL}, void 0);
-        if (type !== void 0) {
-            hir.emit({kind: HIRKind.SYMBOL_TYPE, symbol: ret, type}, void 0);
-        }
-        return ret;
+        return hir.emit({kind: HIRKind.UNKNOWN, type}, void 0);
     }
 
     function genFnType(expr: AstFnType): HIRReg {

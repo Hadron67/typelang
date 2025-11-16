@@ -1,7 +1,7 @@
 import {readFile} from 'fs/promises';
-import { FileId, parse, renderSourceMessage } from './parser';
-import { BuiltinSymbols, checkTypes, Expression, renderTypeCheckResult, SymbolRegistry } from './analyse';
-import { HIRHost, irgen, parseAndIrgen } from './irgen';
+import { FileId, renderSourceMessage } from './parser';
+import { BuiltinSymbols, checkTypes, renderTypeCheckResult, SymbolRegistry } from './analyse';
+import { parseAndIrgen } from './irgen';
 import { Logger } from './util';
 
 const VERBOSE: Logger = {
