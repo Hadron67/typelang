@@ -1,5 +1,5 @@
 import { generateHIRDependencies, HIRCall, HIRFnType, HIRHost, HIRKind, HIRLambda, HIRMemberAccess, HIRReg, HIRSymbolRule } from "./irgen";
-import { SourceRange } from "./parser";
+import { asSourceRange, SourceRange } from "./parser";
 import { assert, constArray, Logger, makeArray, Mutable, panic, popReversed, pushReversed, Timer } from "./util";
 
 export const enum ExpressionKind {
@@ -128,15 +128,15 @@ export interface SymbolData {
 }
 
 export const enum TypeCheckDiagnosticKind {
-    UNEQUAL,
+    UNRESOLVED_CONSTRAINT,
     UNINFERRED,
 }
 
 export type TypeCheckDiagnostic = TypeCheckDiagnosticUnequal | TypeCheckDiagnosticUninferred;
 
 export interface TypeCheckDiagnosticUnequal {
-    readonly kind: TypeCheckDiagnosticKind.UNEQUAL;
-    readonly con: EqualConstraint;
+    readonly kind: TypeCheckDiagnosticKind.UNRESOLVED_CONSTRAINT;
+    readonly con: Constraint;
 }
 
 export interface TypeCheckDiagnosticUninferred {
@@ -146,7 +146,7 @@ export interface TypeCheckDiagnosticUninferred {
 
 export function renderTypeCheckDiagnostic(d: TypeCheckDiagnostic, reg: SymbolRegistry) {
     switch (d.kind) {
-        case TypeCheckDiagnosticKind.UNEQUAL: return [`unequal expressions ${inputForm(reg, d.con.expr1)} and ${inputForm(reg, d.con.expr2)}`];
+        case TypeCheckDiagnosticKind.UNRESOLVED_CONSTRAINT: return [`unresolved constraint ${dumpConstraint(reg, d.con)}`];
         case TypeCheckDiagnosticKind.UNINFERRED: return [`uninferred symbol ${inputForm(reg, d.expr)}`];
     }
 }
@@ -943,23 +943,22 @@ export function countArgs(expr: Expression) {
     return ret;
 }
 
-function checkFnTypeReady(expr: FnTypeExpression) {
-    if (expr.arg !== void 0) {
-        const arg = expr.arg.symbol;
-        return freeQ(expr.outputType, expr => expr.kind === ExpressionKind.UNKNOWN && expr.inScopeVariables.has(arg));
+function checkLocalBindingExpandable(arg: Symbol | undefined, outputType: Expression) {
+    if (arg !== void 0) {
+        return freeQ(outputType, expr => expr.kind === ExpressionKind.UNKNOWN && expr.inScopeVariables.has(arg));
     }
     return true;
 }
 
-function checkFnTypeColor(expr: Expression, color: number) {
+function checkFnTypeColor(expr: Expression, color: number, checkExpandable: boolean) {
     expr = unwrapUnknown(expr);
     while (expr.kind === ExpressionKind.FN_TYPE && expr.color !== color) {
-        if (!checkFnTypeReady(expr)) {
+        if (checkExpandable && !checkLocalBindingExpandable(expr.arg?.symbol, expr.outputType)) {
             return false;
         }
         expr = unwrapUnknown(expr.outputType);
     }
-    return expr.kind === ExpressionKind.FN_TYPE && checkFnTypeReady(expr);
+    return expr.kind === ExpressionKind.FN_TYPE && (!checkExpandable || checkLocalBindingExpandable(expr.arg?.symbol, expr.outputType));
 }
 
 export interface TypeCheckResult {
@@ -983,10 +982,34 @@ interface HIRResolvedData {
     value?: Expression;
 }
 
-interface EqualConstraint {
+export const enum ConstraintKind {
+    EQUAL,
+    FN_TYPE_BODY,
+}
+
+export type Constraint = EqualConstraint | FnTypeBodyEqualConstraint;
+
+export interface FnTypeBodyEqualConstraint {
+    readonly kind: ConstraintKind.FN_TYPE_BODY;
+    readonly source: HIRReg;
+    readonly arg1: Symbol;
+    readonly arg2: Symbol;
+    readonly body1: Expression;
+    readonly body2: Expression;
+}
+
+export interface EqualConstraint {
+    readonly kind: ConstraintKind.EQUAL;
     readonly source: HIRReg;
     readonly expr1: Expression;
     readonly expr2: Expression;
+}
+
+export function dumpConstraint(reg: SymbolRegistry, con: Constraint) {
+    switch (con.kind) {
+        case ConstraintKind.EQUAL: return `${inputForm(reg, con.expr1)} === ${inputForm(reg, con.expr2)}, source ${con.source}`;
+        case ConstraintKind.FN_TYPE_BODY: return `fn_constraint: ${reg.getSymbolDisplayName(con.arg1)} -> ${inputForm(reg, con.body1)} === ${reg.getSymbolDisplayName(con.arg1)} -> ${inputForm(reg, con.body2)}`;
+    }
 }
 
 export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, hir: HIRHost, logger: Logger): TypeCheckResult | null {
@@ -994,7 +1017,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
     const hirResolvedData: HIRResolvedData[] = makeArray(() => ({completeDone: false, noEqualConstraints: true, errored: false}), hirRegs.length);
     const hirDependencies = generateHIRDependencies(hir);
     const tempRegistry = new SymbolRegistry(registry);
-    const equalConstraints: EqualConstraint[] = [];
+    const constraints: Constraint[] = [];
     const diagnostics: TypeCheckDiagnostic[] = [];
 
     run();
@@ -1179,7 +1202,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         if (fnType.kind !== ExpressionKind.FN_TYPE) {
             return null;
         }
-        if (!checkFnTypeColor(fnType, color)) {
+        if (!checkFnTypeColor(fnType, color, true)) {
             return null;
         }
         let ret = fn;
@@ -1272,9 +1295,16 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
                 arg = r;
             }
             let type = unwrapUnknown(resolved.type);
-            if (type.kind !== ExpressionKind.FN_TYPE && !checkFnTypeColor(type, 0)) {
+            if (type.kind !== ExpressionKind.FN_TYPE || !checkFnTypeColor(type, 0, false)) {
                 return false;
             }
+
+            if (arg !== void 0) {
+                markInScopeVariable(body, arg.symbol);
+                addEqualConstraint(typeOfExpression0(arg), type.inputType, source);
+            }
+            addEqualConstraint(typeOfExpression0(body), type.outputType, source);
+            body = {kind: ExpressionKind.LAMBDA, type, body};
 
             const inferedFns: FnTypeExpression[] = [];
             while (type.kind === ExpressionKind.FN_TYPE && type.color !== 0) {
@@ -1283,7 +1313,10 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
             }
             for (let i = 0; i < inferedFns.length; i++) {
                 const inferedFn = inferedFns[inferedFns.length - 1 - i];
-
+                let arg: SymbolExpression | undefined = void 0;
+                if (inferedFn.arg !== void 0) {
+                    
+                }
             }
 
             panic("TODO");
@@ -1338,10 +1371,14 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         return true;
     }
 
+    function addConstraint(con: Constraint) {
+        logger.info(() => `add constraint ${dumpConstraint(tempRegistry, con)}`);
+        constraints.push(con);
+        hirResolvedData[con.source].noEqualConstraints = false;
+    }
+
     function addEqualConstraint(expr1: Expression, expr2: Expression, source: HIRReg) {
-        logger.info(() => `add equal constraint ${inputForm(tempRegistry, expr1)} === ${inputForm(tempRegistry, expr2)}, source: %${source}`);
-        equalConstraints.push({expr1, expr2, source});
-        hirResolvedData[source].noEqualConstraints = false;
+        addConstraint({kind: ConstraintKind.EQUAL, expr1, expr2, source});
     }
 
     function setSymbolValue(symbol: Symbol, value: Expression, source: HIRReg) {
@@ -1447,16 +1484,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         }
     }
 
-    function evaluateEqualConstraint(con: EqualConstraint, fixedPoint: boolean) {
-        logger.info(() => `evaluating ${inputForm(tempRegistry, con.expr1)} === ${inputForm(tempRegistry, con.expr2)}, source %${con.source}`);
-        const oldExpr1 = con.expr1;
-        const oldExpr2 = con.expr2;
-        let expr1 = evaluate(oldExpr1);
-        let expr2 = evaluate(oldExpr2);
-        if (oldExpr1 !== expr1 || oldExpr2 !== expr2) {
-            logger.info(() => `evaluated expr: ${inputForm(tempRegistry, expr1)} === ${inputForm(tempRegistry, expr2)}`);
-        }
-        const changed = expr1 !== oldExpr1 || expr2 !== oldExpr2;
+    function evaluateEqualConstraint(expr1: Expression, expr2: Expression, source: HIRReg, fixedPoint: boolean) {
         if (expr1.kind !== ExpressionKind.UNKNOWN && expr2.kind === ExpressionKind.UNKNOWN) {
             const t = expr1;
             expr1 = expr2;
@@ -1479,14 +1507,14 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
                 logger.info(() => `rejecting unknown assign ${inputForm(tempRegistry, expr1)} = ${inputForm(tempRegistry, expr2)}`);
                 return false;
             }
-            addEqualConstraint(expr1.type, typeOfExpression0(expr2), con.source);
+            addEqualConstraint(expr1.type, typeOfExpression0(expr2), source);
             expr1.value = expr2;
             const {index, isPattern} = expr1;
             logger.info(() => `setting unknown ?${isPattern ? '#' : ''}${index} = ${inputForm(tempRegistry, expr2)}`);
             return true;
         }
         if (expr1.kind === ExpressionKind.UNIVERSE && expr2.kind === ExpressionKind.UNIVERSE) {
-            addEqualConstraint(expr1.level, expr2.level, con.source);
+            addEqualConstraint(expr1.level, expr2.level, source);
             return true;
         }
         if (expr1.kind === ExpressionKind.NUMBER && expr2.kind === ExpressionKind.NUMBER && expr1.isLevel && expr2.isLevel && expr1.value === expr2.value) {
@@ -1495,7 +1523,6 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         if (expr1.kind === ExpressionKind.STRING && expr2.kind === ExpressionKind.STRING && expr1.value === expr2.value) {
             return true;
         }
-
         if (expr1.kind !== ExpressionKind.CALL && expr2.kind === ExpressionKind.CALL) {
             const t = expr1;
             expr1 = expr2;
@@ -1504,23 +1531,20 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         if (expr1.kind === ExpressionKind.CALL) {
             if (expr2.kind === ExpressionKind.CALL) {
                 if (fixedPoint) {
-                    addEqualConstraint(expr1.fn, expr2.fn, con.source);
-                    addEqualConstraint(expr1.arg, expr2.arg, con.source);
+                    addEqualConstraint(expr1.fn, expr2.fn, source);
+                    addEqualConstraint(expr1.arg, expr2.arg, source);
                     return true;
                 }
                 const [fn1, args1] = collectFnArgs(expr1);
                 const [fn2, args2] = collectFnArgs(expr2);
-                if (fn1.kind === ExpressionKind.UNKNOWN && fn1.index === 326 && args1[0].kind === ExpressionKind.UNKNOWN && args1[0].index === 325) {
-                    debugger;
-                }
                 if (fn1.kind === ExpressionKind.SYMBOL && fn2.kind === ExpressionKind.SYMBOL) {
                     if (args1.length === args2.length && fn1.symbol === fn2.symbol) {
                         const entry = tempRegistry.getSymbolEntry(fn1.symbol);
                         if (0 === (entry.flags & (SymbolFlags.ALLOW_DOWN_VALUE | SymbolFlags.ALLOW_ASSIGNMENT))) {
                             for (let i = 0; i < args1.length; i++) {
-                                addEqualConstraint(args1[i], args2[i], con.source);
+                                addEqualConstraint(args1[i], args2[i], source);
                             }
-                            addEqualConstraint(expr1.type, expr2.type, con.source);
+                            addEqualConstraint(expr1.type, expr2.type, source);
                             return true;
                         }
                     }
@@ -1535,32 +1559,99 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
             }
             if (expr1.arg.kind === ExpressionKind.SYMBOL && tempRegistry.isVariable(expr1.arg.symbol) && symbolFreeQ(expr1.fn, expr1.arg.symbol)) {
                 if (fixedPoint || !argsContainsUninferedTemps(tempRegistry, expr1) && !containsUninferedTemps(tempRegistry, expr2)) {
-                    addEqualConstraint(expr1.fn, makeLambda(expr2, expr1.arg, typeOfExpression0(expr1.fn)), con.source);
-                    addEqualConstraint(expr1.type, typeOfExpression0(expr2), con.source);
+                    addEqualConstraint(expr1.fn, makeLambda(expr2, expr1.arg, typeOfExpression0(expr1.fn)), source);
+                    addEqualConstraint(expr1.type, typeOfExpression0(expr2), source);
                     return true;
                 }
             }
         }
         if (expr1.kind === ExpressionKind.FN_TYPE && expr2.kind === ExpressionKind.FN_TYPE) {
-            let output2 = expr2.outputType;
+            addEqualConstraint(expr1.inputType, expr2.inputType, source);
             if (expr1.arg !== void 0 && expr2.arg !== void 0 && expr1.arg.symbol !== expr2.arg.symbol) {
-                output2 = replaceOneSymbol(output2, expr2.arg.symbol, expr1.arg);
+                addConstraint({kind: ConstraintKind.FN_TYPE_BODY, arg1: expr1.arg.symbol, arg2: expr2.arg.symbol, body1: expr1.outputType, body2: expr2.outputType, source});
+            } else {
+                addEqualConstraint(expr1.outputType, expr2.outputType, source);
             }
-            addEqualConstraint(expr1.inputType, expr2.inputType, con.source);
-            addEqualConstraint(expr1.outputType, output2, con.source);
             return true;
         }
-        if (sameQ(expr1, expr2)) {
+        if (expr1.kind === ExpressionKind.LAMBDA && expr2.kind === ExpressionKind.LAMBDA) {
+            let expandable2 = checkLocalBindingExpandable(expr2.arg?.symbol, expr2);
+            if (!expandable2 && checkLocalBindingExpandable(expr1.arg?.symbol, expr1)) {
+                const t = expr1;
+                expr1 = expr2;
+                expr2 = t;
+                expandable2 = true;
+            }
+            if (!expandable2) {
+                return false;
+            }
+            let body2 = expr2.body;
+            if (expr1.arg !== void 0 && expr2.arg !== void 0 && expr1.arg.symbol !== expr2.arg.symbol) {
+                body2 = replaceOneSymbol(body2, expr2.arg.symbol, expr1.arg);
+            }
+            addEqualConstraint(expr1.body, body2, source);
+            addEqualConstraint(expr1.type, expr2.type, source);
             return true;
         }
-        if (changed) {
-            logger.info(() => 'changed');
-            addEqualConstraint(expr1, expr2, con.source);
-        } else {
-            logger.info(() => 'unchanged');
-            equalConstraints.push(con);
+        return false;
+    }
+
+    function evaluateFnTypeBodyEqualConstrait(con: FnTypeBodyEqualConstraint) {
+        let {arg1, arg2, body1, body2} = con;
+        assert(arg1 !== arg2);
+        let expandable2 = checkLocalBindingExpandable(arg2, body2);
+        if (!expandable2 && checkLocalBindingExpandable(arg1, body1)) {
+            const t = body1;
+            body1 = body2;
+            body2 = t;
+            const t2 = arg1;
+            arg1 = arg2;
+            arg2 = t2;
+            expandable2 = true;
         }
-        return changed;
+        if (!expandable2) {
+            return false;
+        }
+        addEqualConstraint(body1, replaceOneSymbol(body2, arg2, se(arg1)), con.source);
+        return true;
+    }
+
+    function evaluateConstraint(con: Constraint, isFixedPoint: boolean) {
+        logger.info(() => `evaluating ${dumpConstraint(tempRegistry, con)}`);
+        switch (con.kind) {
+            case ConstraintKind.EQUAL: {
+                const oldExpr1 = con.expr1;
+                const oldExpr2 = con.expr2;
+                let expr1 = evaluate(oldExpr1);
+                let expr2 = evaluate(oldExpr2);
+                if (oldExpr1 !== expr1 || oldExpr2 !== expr2) {
+                    logger.info(() => `evaluated expr: ${inputForm(tempRegistry, expr1)} === ${inputForm(tempRegistry, expr2)}`);
+                }
+                const changed = expr1 !== oldExpr1 || expr2 !== oldExpr2;
+                if (evaluateEqualConstraint(expr1, expr2, con.source, isFixedPoint)) {
+                    return true;
+                }
+                if (sameQ(expr1, expr2)) {
+                    return true;
+                }
+                if (changed) {
+                    logger.info(() => 'changed');
+                    addEqualConstraint(expr1, expr2, con.source);
+                } else {
+                    logger.info(() => 'unchanged');
+                    constraints.push(con);
+                }
+                return changed;
+            }
+            case ConstraintKind.FN_TYPE_BODY: {
+                if (evaluateFnTypeBodyEqualConstrait(con)) {
+                    return true;
+                } else {
+                    constraints.push(con);
+                    return false;
+                }
+            }
+        }
     }
 
     function pollAllHIR() {
@@ -1587,27 +1678,27 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         return changed;
     }
 
-    function dumpEqualConstraints(title: string) {
+    function dumpConstraints(title: string) {
         logger.info(() => {
             const ret: string[] = [title + ': equal constraints:'];
-            for (const con of equalConstraints) {
-                ret.push(`    ${inputForm(tempRegistry, con.expr1)} === ${inputForm(tempRegistry, con.expr2)}, source: %${con.source}`);
+            for (const con of constraints) {
+                ret.push('    ' + dumpConstraint(tempRegistry,  con));
             }
             ret.push('end');
             return ret;
         });
     }
 
-    function evaluateEqualConstraints(fixedPoint: boolean) {
-        dumpEqualConstraints('before');
+    function evaluateConstraints(fixedPoint: boolean) {
+        dumpConstraints('before');
         let done = false;
         let changed = false;
         while (!done) {
             done = true;
-            const ec = equalConstraints.slice(0);
-            equalConstraints.length = 0;
-            for (const con of ec) {
-                if (evaluateEqualConstraint(con, fixedPoint)) {
+            const cons = constraints.slice(0);
+            constraints.length = 0;
+            for (const con of cons) {
+                if (evaluateConstraint(con, fixedPoint)) {
                     if (fixedPoint) {
                         fixedPoint = false;
                     }
@@ -1616,7 +1707,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
                 }
             }
         }
-        dumpEqualConstraints('after');
+        dumpConstraints('after');
         return changed;
     }
 
@@ -1624,7 +1715,7 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
         for (const data of hirResolvedData) {
             data.noEqualConstraints = true;
         }
-        for (const con of equalConstraints) {
+        for (const con of constraints) {
             hirResolvedData[con.source].noEqualConstraints = false;
         }
     }
@@ -1637,8 +1728,8 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
             changed = pollAllHIR() || changed;
         }
         logger.info(() => `poll HIR took ${timer.elapsed()}ms`);
-        changed = evaluateEqualConstraints(fixedPoint) || changed;
-        logger.info(() => `equal contraints took ${timer.elapsed()}ms`);
+        changed = evaluateConstraints(fixedPoint) || changed;
+        logger.info(() => `contraints took ${timer.elapsed()}ms`);
         if (changed) {
             updateNoEqualConstraintsMarker();
             logger.info(() => `refresh took ${timer.elapsed()}ms`);
@@ -1655,16 +1746,15 @@ export function checkTypes(registry: SymbolRegistry, builtins: BuiltinSymbols, h
             while (iterate(false)) {
                 iterations++;
             }
-            logger.info(() => `fixed iteration ${iterations}`);
+            logger.info(() => `fixed iteration ${fixedIterations}`);
             if (!iterate(true)) {
                 fixedIterations++;
-                const s = new Date();
                 break;
             }
         }
 
-        for (const con of equalConstraints) {
-            diagnostics.push({kind: TypeCheckDiagnosticKind.UNEQUAL, con});
+        for (const con of constraints) {
+            diagnostics.push({kind: TypeCheckDiagnosticKind.UNRESOLVED_CONSTRAINT, con});
         }
         for (const expr of tempRegistry.unknowns) {
             if (expr.value === void 0) {
@@ -1737,7 +1827,7 @@ export class Evaluator {
                         const arg = self.stack.pop()!;
                         const fn = self.stack.pop()!;
                         if (fn.kind === ExpressionKind.LAMBDA) {
-                            if (fn.arg !== void 0 && freeQ(fn.body, expr => expr.kind === ExpressionKind.UNKNOWN && expr.inScopeVariables.has(fn.arg!.symbol))) {
+                            if (fn.arg !== void 0 && checkLocalBindingExpandable(fn.arg.symbol, fn.body)) {
                                 self.doActions(self._evaluate(replaceOneSymbol(fn.body, fn.arg.symbol, arg)));
                             } else {
                                 self.stack.push(fn.body);

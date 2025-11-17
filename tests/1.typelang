@@ -85,6 +85,11 @@ module Nat {
     plus(?x, zero) = x;
     plus(?x, succ(?y)) = succ(plus(x, y));
 
+    module plus-lemma {
+        l1: (x: Nat) -> Eq(plus(zero, x), x);
+        l1(zero) = Eq.refl(_);
+    }
+
     times: Self -> Self -> Self;
     times(?x, zero) = zero;
     times(?x, succ(?y)) = plus(times(x, y), x);

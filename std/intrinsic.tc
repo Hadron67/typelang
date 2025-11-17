@@ -2,7 +2,9 @@
 display: [n, T: Type(n)] -> T -> void;
 
 as: [n](T: Type(n)) -> T -> T;
+#[inline]
 as(?, ?a) = a;
 
 typeof: [n, T: Type(n)] -> T -> Type(n);
+#[inline]
 typeof[?, ?T](?) = T;
