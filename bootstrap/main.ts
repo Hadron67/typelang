@@ -1,6 +1,6 @@
 import {readFile} from 'fs/promises';
 import { FileId, renderSourceMessage } from './parser';
-import { BuiltinSymbols, checkTypes, renderTypeCheckResult, SymbolRegistry } from './analyse';
+import { BuiltinSymbols, ConstraintSolver, Expression, ExpressionKind, ExpressionStringifier, HIRSolver, renderTypeCheckDiagnostic, SymbolExpression } from './analyse';
 import { parseAndIrgen } from './irgen';
 import { Logger } from './util';
 
@@ -24,18 +24,26 @@ const NO_LOG: Logger = {
 async function run(entry: string, logger: Logger) {
     const file = await readFile(entry, 'utf-8');
     const lines = file.split('\n').map(e => e + '\n');
-    const reg = new SymbolRegistry(null);
-    const builtins = new BuiltinSymbols(reg);
+    const builtins = new BuiltinSymbols();
+    const stringifier = new ExpressionStringifier();
     const parseResult = parseAndIrgen(builtins, builtins.getInitialScope(), file, 0 as FileId);
+
+    const root: SymbolExpression = {kind: ExpressionKind.SYMBOL, name: 'root', flags: 0};
     if (parseResult.isLeft) {
-        logger.info(() => parseResult.value.dump(reg));
-        const typeCheck = checkTypes(reg, builtins, parseResult.value, logger);
-        if (typeCheck !== null) {
-            for (const line of renderTypeCheckResult(typeCheck)) {
-                console.log(line);
+        logger.info(() => parseResult.value.dump(stringifier));
+        const typeCache = new WeakMap<Expression, Expression>();
+        const csolver = new ConstraintSolver(logger, stringifier, builtins, typeCache);
+        const solver = new HIRSolver(root, parseResult.value.regs, csolver);
+        solver.run();
+        const diag = solver.collectDiagnostics();
+        if (diag.length > 0) {
+            for (const d of diag) {
+                for (const line of renderTypeCheckDiagnostic(d, stringifier)) {
+                    console.log(line);
+                }
             }
         } else {
-            logger.info(() => reg.dump());
+            logger.info(() => stringifier.dumpSymbol(root));
         }
     } else {
         for (const msg of parseResult.value) {
@@ -46,4 +54,4 @@ async function run(entry: string, logger: Logger) {
     }
 }
 
-run(process.argv[2], NO_LOG);
+run(process.argv[2], VERBOSE);

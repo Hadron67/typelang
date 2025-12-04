@@ -110,3 +110,42 @@ export class Timer {
         return ret;
     }
 }
+
+export class PtrNumbering<T extends object> {
+    private counter = 0;
+    private readonly map = new WeakMap<T, number>();
+    get(ptr: T) {
+        let ret = this.map.get(ptr);
+        if (ret === void 0) {
+            ret = this.counter++;
+            this.map.set(ptr, ret);
+        }
+        return ret;
+    }
+}
+
+export interface Executor {
+    execute(runnable: () => void): void;
+}
+
+export class Future<T> {
+    private value: T | undefined = void 0;
+    private hasValue = false; // needed if T is ...something... | undefined
+    private readonly callbacks: ((value: T) => void)[] = [];
+    constructor(private readonly executor: Executor) {}
+    setValue(value: T) {
+        assert(!this.hasValue);
+        this.hasValue = true;
+        this.value = value;
+        for (const cb of this.callbacks) {
+            this.executor.execute(() => cb(value));
+        }
+    }
+    wait(cb: (value: T) => void) {
+        if (this.hasValue) {
+            this.executor.execute(() => cb(this.value!));
+        } else {
+            this.callbacks.push(cb);
+        }
+    }
+}

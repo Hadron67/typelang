@@ -1,8 +1,9 @@
-import { ExpressionKind, BuiltinSymbols, Expression, SymbolRegistry, inputForm, se, SymbolFlags } from "./analyse";
+import { ExpressionKind, BuiltinSymbols, Expression, SymbolFlags, ExpressionStringifier, SymbolExpression } from "./analyse";
 import { asSourceRange, Ast, AstCall, AstFnType, AstIdentifier, AstKind, FileId, parse, SourceRange, sourceRangeBetween, SourceRangeMessage } from "./parser";
 import { assert, Either, panic } from "./util";
 
 export const enum HIRKind {
+    ROOT,
     EXPR,
     NUMBER,
     LAMBDA,
@@ -14,11 +15,13 @@ export const enum HIRKind {
     SYMBOL_ASSIGN,
     SYMBOL_RULE,
     UNKNOWN,
+    VARIABLE,
 }
 
 export type HIRReg = number & { __marker: HIRReg };
 
 export type HIRData =
+    | HIRRoot
     | HIRExpression
     | HIRCall
     | HIRNumber
@@ -30,6 +33,7 @@ export type HIRData =
     | HIRSymbolAssignment
     | HIRSymbolRule
     | HIRUnknown
+    | HIRVariable
 ;
 
 export interface DownValue {
@@ -38,9 +42,14 @@ export interface DownValue {
     readonly patterns: Set<HIRReg>;
 }
 
+export interface HIRRoot {
+    readonly kind: HIRKind.ROOT;
+}
+
 export interface HIRExpression {
     readonly kind: HIRKind.EXPR;
     readonly expr: Expression;
+    readonly type?: Expression;
 }
 
 export interface HIRNumber {
@@ -93,7 +102,7 @@ export interface HIRRule {
 export interface HIRSymbol {
     readonly kind: HIRKind.SYMBOL;
     readonly name?: string;
-    readonly parent: HIRReg | null;
+    readonly parent?: HIRReg;
     flags: number;
 }
 
@@ -121,6 +130,12 @@ export interface HIRUnknown {
     readonly type?: HIRReg;
 }
 
+export interface HIRVariable {
+    readonly kind: HIRKind.VARIABLE;
+    readonly name?: string;
+    readonly type?: HIRReg;
+}
+
 export interface HIRRegData {
     readonly loc?: SourceRange;
     readonly value: HIRData;
@@ -133,7 +148,7 @@ export class HIRHost {
         this.regs.push({value, loc});
         return ret;
     }
-    dump(registry: SymbolRegistry) {
+    dump(registry: ExpressionStringifier) {
         const ret: string[] = [];
         for (let i = 0, a = this.regs; i < a.length; i++) {
             ret.push(`%${i} = ${dumpHIR(registry, a[i].value)}`);
@@ -142,7 +157,7 @@ export class HIRHost {
     }
 }
 
-export function dumpHIR(registry: SymbolRegistry, data: HIRData): string {
+export function dumpHIR(registry: ExpressionStringifier, data: HIRData): string {
     switch (data.kind) {
         case HIRKind.CALL: return data.color === 0 ? `%${data.fn}($${data.arg})` : `%${data.fn}[$${data.arg}]`;
         case HIRKind.FN_TYPE: {
@@ -163,10 +178,12 @@ export function dumpHIR(registry: SymbolRegistry, data: HIRData): string {
         case HIRKind.LAMBDA: {
             return (data.arg !== void 0 ? `\\%${data.arg} ` : '\\_ ') + `%${data.body}`;
         }
-        case HIRKind.EXPR: return inputForm(registry, data.expr);
+        case HIRKind.EXPR: return registry.stringify(data.expr);
         case HIRKind.NUMBER: return data.value.toString();
         case HIRKind.MEMBER_ACCESS: return `%${data.lhs}.${data.name}`;
         case HIRKind.UNKNOWN: return 'unknown' + (data.type !== void 0 ? ` %${data.type}` : '');
+        case HIRKind.VARIABLE: return 'variable' + (data.type !== void 0 ? ` %${data.type}` : '');
+        case HIRKind.ROOT: return 'root';
         case HIRKind.SYMBOL: return `symbol ${data.name ?? '<no name>'}${data.parent === null ? '' : `, parent = %${data.parent}`}`;
         case HIRKind.SYMBOL_TYPE: return `%${data.symbol}: %${data.type}`;
         case HIRKind.SYMBOL_ASSIGN: return `%${data.symbol} === %${data.value}`;
@@ -217,7 +234,7 @@ const CCODE_I = 'i'.charCodeAt(0);
 
 type PatternResolver = (name: AstIdentifier | undefined, isPattern: boolean) => HIRReg | null;
 
-export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, builtins: BuiltinSymbols): Either<HIRHost, SourceRangeMessage[]> {
+export function irgen(inputAst: Ast[], initialScope: Map<string, SymbolExpression>, builtins: BuiltinSymbols): Either<HIRHost, SourceRangeMessage[]> {
     const scopes: Map<string, HIRReg>[] = [];
     const diagnostics: SourceRangeMessage[] = [];
     const selfStack: HIRReg[] = [];
@@ -226,9 +243,9 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
 
     {
         const firstScope = new Map<string, HIRReg>();
-        initialScope.forEach((v, k) => firstScope.set(k, hir.emit({kind: HIRKind.EXPR, expr: v}, void 0)));
+        initialScope.forEach((v, k) => firstScope.set(k, hir.emit({kind: HIRKind.EXPR, expr: v, type: v.type}, void 0)));
         scopes.push(firstScope);
-        const ret = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: 0}, void 0);
+        const ret = hir.emit({kind: HIRKind.ROOT}, void 0);
         genModuleBody(ret, inputAst);
         if (diagnostics.length > 0) {
             return {isLeft: false, value: diagnostics};
@@ -305,7 +322,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
             case AstKind.LAMBDA: {
                 let arg: HIRReg | undefined = void 0;
                 if (expr.arg.name !== '_') {
-                    const arg = hir.emit({kind: HIRKind.SYMBOL, parent: null, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE}, expr.arg);
+                    const arg = hir.emit({kind: HIRKind.VARIABLE, name: expr.arg.name}, expr.arg);
                     const newScope = new Map<string, HIRReg>();
                     newScope.set(expr.arg.name, arg);
                     scopes.push(newScope);
@@ -323,7 +340,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
                 if (expr.arg !== void 0) {
                     arg = genExpression(expr.arg);
                 } else {
-                    arg = hir.emit({kind: HIRKind.EXPR, expr: se(builtins.unit)}, void 0);
+                    arg = hir.emit({kind: HIRKind.EXPR, expr: builtins.unit}, void 0);
                 }
                 return hir.emit({kind: HIRKind.CALL, fn, arg, color: expr.color, isPattern: false}, loc);
             }
@@ -364,8 +381,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
             scopes.push(scope);
             for (const [arg, argType] of args.args) {
                 const inputType = argType !== void 0 ? genExpression(argType) : emitUnknown(void 0);
-                const argVar = hir.emit({kind: HIRKind.SYMBOL, name: arg.name, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE, parent: null}, arg);
-                hir.emit({kind: HIRKind.SYMBOL_TYPE, symbol: argVar, type: inputType}, void 0);
+                const argVar = hir.emit({kind: HIRKind.VARIABLE, name: arg.name, type: inputType}, arg);
                 scope.set(arg.name, argVar);
                 fns.push({color, inputType, arg: argVar, loc: argType !== void 0 ? sourceRangeBetween(arg, argType) : asSourceRange(arg)});
             }
@@ -480,7 +496,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
         switch (expr.kind) {
             case AstKind.CALL: {
                 const fn = genPatternLhs(expr.fn, patterns);
-                const arg = expr.arg !== void 0 ? genPatternLhs(expr.arg, patterns) : hir.emit({kind: HIRKind.EXPR, expr: se(builtins.unit)}, void 0);
+                const arg = expr.arg !== void 0 ? genPatternLhs(expr.arg, patterns) : hir.emit({kind: HIRKind.EXPR, expr: builtins.unit}, void 0);
                 return hir.emit({kind: HIRKind.CALL, isPattern: true, fn, arg, color: expr.color}, expr);
             }
             case AstKind.PATTERN: {
@@ -489,7 +505,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
                 if (s !== void 0) {
                     return s;
                 }
-                const ns = hir.emit({kind: HIRKind.SYMBOL, flags: SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.IS_VARIABLE, name: name?.name, parent: null}, expr);
+                const ns = hir.emit({kind: HIRKind.VARIABLE, name: name?.name}, expr);
                 if (name !== void 0) {
                     patterns.set(name.name, ns);
                 }
@@ -500,7 +516,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, Expression>, bu
     }
 }
 
-export function parseAndIrgen(builtins: BuiltinSymbols, initialScope: Map<string, Expression>, input: string, file: FileId): Either<HIRHost, SourceRangeMessage[]> {
+export function parseAndIrgen(builtins: BuiltinSymbols, initialScope: Map<string, SymbolExpression>, input: string, file: FileId): Either<HIRHost, SourceRangeMessage[]> {
     const parseResult = parse(input, file);
     if (!parseResult.isLeft) {
         return {isLeft: false, value: parseResult.value};

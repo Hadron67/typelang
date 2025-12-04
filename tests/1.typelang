@@ -76,6 +76,9 @@ module Nat {
     zero: Self;
     succ: Self -> Self;
 
+    eq-succ: [x: Nat, y: Nat] -> Eq(x, y) -> Eq(succ(x), succ(y));
+    eq-succ(Eq.refl(?)) = Eq.refl(_);
+
     max: Self -> Self -> Self;
     max(?x, zero) = x;
     max(zero, ?x) = x;
@@ -86,14 +89,32 @@ module Nat {
     plus(?x, succ(?y)) = succ(plus(x, y));
 
     module plus-lemma {
-        l1: (x: Nat) -> Eq(plus(zero, x), x);
+        l1: (x: Nat) -> Eq(x, plus(zero, x));
         l1(zero) = Eq.refl(_);
+        l1(succ(?x)) = eq-succ(l1(x));
+
+        l2: (x: Nat, y: Nat) -> Eq(succ(plus(x, y)), plus(succ(x), y));
+        l2(?x, zero) = Eq.refl(_);
+        l2(?x, succ(?y)) = eq-succ(l2(x, y));
+
+        commu: (x: Nat, y: Nat) -> Eq(plus(x, y), plus(y, x));
+        commu(?x, zero) = l1(x);
+        commu(?x, succ(?y)) = Eq.concat(eq-succ(commu(x, y)), l2(y, x));
     }
 
     times: Self -> Self -> Self;
     times(?x, zero) = zero;
     times(?x, succ(?y)) = plus(times(x, y), x);
 
+    module times-lemma {
+        l1: (x: Nat) -> Eq(times(zero, x), zero);
+        l1(zero) = Eq.refl(_);
+        l1(succ(?x)) = l1(x);
+
+        commu: (x: Nat, y: Nat) -> Eq(times(x, y), times(y, x));
+    }
+
+    one = succ(zero);
     two = succ(succ(zero));
     three = succ(two);
     four = succ(three);
