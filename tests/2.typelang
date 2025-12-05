@@ -3,4 +3,8 @@ module Eq {
     refl: [n, T: Type(n)](x: T) -> Self(x, x);
 
     inv: [n, T: Type(n), x: T, y] -> Self(x, y) -> Self(y, x);
+    inv(refl(?)) = refl(_);
+
+    concat: [n, T: Type(n), x: T, y, z] -> Self(x, y) -> Self(y, z) -> Self(x, z);
+    concat(refl(?x), refl(?x)) = refl(_);
 }

@@ -1,4 +1,4 @@
-import { generateHIRDependencies, HIRCall, HIRFnType, HIRHost, HIRKind, HIRLambda, HIRMemberAccess, HIRReg, HIRRegData, HIRSymbolRule } from "./irgen";
+import { generateHIRDependencies, HIRCall, HIRFnType, HIRHost, HIRKind, HIRLambda, HIRMemberAccess, HIRReg, HIRRegData, HIRSymbol, HIRSymbolRule } from "./irgen";
 import { asSourceRange, SourceRange } from "./parser";
 import { assert, constArray, Either, Logger, makeArray, Mutable, panic, popReversed, PtrNumbering, pushReversed, Timer } from "./util";
 
@@ -317,21 +317,21 @@ export class BuiltinSymbols {
         return {kind: ExpressionKind.CALL, fn: this.type, arg: level, color: 0};
     }
     makeUnknownUniverse() {
-        return this.makeUniverse(makeUnknown(this.levelType));
+        return this.makeUniverse(makeUnknown(this.levelType, false));
     }
 }
 
-function makeUnknown(type: Expression): UnknownExpression {
+function makeUnknown(type: Expression, isPattern: boolean): UnknownExpression {
     return {
         kind: ExpressionKind.UNKNOWN,
-        isPattern: false,
+        isPattern,
         excludedVariables: new Set(),
         type,
     };
 }
 
 function makeUnknownType(builtins: BuiltinSymbols): UnknownExpression {
-    return makeUnknown(builtins.makeUniverse(makeUnknown(builtins.levelType)));
+    return makeUnknown(builtins.makeUniverse(makeUnknown(builtins.levelType, false)), false);
 }
 
 export function getCachedType(cache: WeakMap<Expression, Expression>, expr: Expression) {
@@ -642,7 +642,9 @@ function checkFnTypeColor(expr: Expression, color: number) {
 // main purpose of this function is removing unknown expressions
 export function copyExpression(expr: Expression) {
     return mapExpression(expr, {
-        map() {},
+        map(expr, info) {
+            info.emit(expr);
+        },
         leaveScope() {},
         enterScope() {},
     }) ?? panic();
@@ -696,17 +698,31 @@ export class ExpressionMap {
                     break;
                 }
                 case ExpressionKind.FN_TYPE: {
-                    self.doActions(self.map(expr.inputType), self.map(expr.outputType), self => {
+                    self.doActions(self.map(expr.inputType), self => {
+                        if (expr.arg !== void 0) {
+                            self.mapper.enterScope(expr.arg, self);
+                        }
+                    }, self.map(expr.outputType), self => {
                         const outputType = self.stack.pop()!;
                         const inputType = self.stack.pop()!;
+                        if (expr.arg !== void 0) {
+                            self.mapper.leaveScope(expr.arg, self);
+                        }
                         self.stack.push(inputType !== expr.inputType || outputType !== expr.outputType ? {...expr, inputType, outputType} : expr);
                     });
                     break;
                 }
                 case ExpressionKind.LAMBDA: {
-                    self.doActions(self.map(expr.argType), self.map(expr.body), self => {
+                    self.doActions(self.map(expr.argType), self => {
+                        if (expr.arg !== void 0) {
+                            self.mapper.enterScope(expr.arg, self);
+                        }
+                    }, self.map(expr.body), self => {
                         const body = self.stack.pop()!;
                         const argType = self.stack.pop()!;
+                        if (expr.arg !== void 0) {
+                            self.mapper.leaveScope(expr.arg, self);
+                        }
                         self.stack.push(body !== expr.body || argType !== expr.argType ? {...expr, argType, body} : body);
                     });
                     break;
@@ -1057,6 +1073,7 @@ export interface TypeofConstraint {
 export class ConstraintSolver {
     private readonly constraints: Constraint[] = [];
     private readonly erroredConstraints: Constraint[] = [];
+    private readonly constraintUnknowns = new Set<UnknownExpression>();
     constructor(
         readonly logger: Logger,
         readonly stringifier: ExpressionStringifier,
@@ -1065,7 +1082,41 @@ export class ConstraintSolver {
     ) {}
     add(con: Constraint) {
         this.logger.info(() => `add constraint ${dumpConstraint(con, this.stringifier)}`);
+        this.scanConstraintUnknonws(con);
         this.constraints.push(con);
+    }
+    private scanUnknowns(expr: Expression) {
+        visitExpression(expr, expr => {
+            if (expr.kind === ExpressionKind.UNKNOWN) {
+                this.constraintUnknowns.add(expr);
+            }
+            return false;
+        });
+    }
+    private scanConstraintUnknonws(con: Constraint) {
+        switch (con.kind) {
+            case ConstraintKind.EQUAL:
+                this.scanUnknowns(con.expr1);
+                this.scanUnknowns(con.expr2);
+                break;
+            case ConstraintKind.EQUAL_WITH_REPLACE:
+                this.constraintUnknowns.add(con.target);
+                this.scanUnknowns(con.replacement);
+                break;
+            case ConstraintKind.FN_TYPE_TYPE:
+                this.constraintUnknowns.add(con.target);
+                this.scanUnknowns(con.type1);
+                this.scanUnknowns(con.type2);
+                break;
+            case ConstraintKind.TYPEOF:
+                this.constraintUnknowns.add(con.target);
+                this.scanUnknowns(con.expr);
+                break;
+            default: panic();
+        }
+    }
+    containsConstraintUnknown(expr: Expression) {
+        return visitExpression(expr, expr => this.constraintUnknowns.has(expr as any));
     }
     addEqualConstraint(expr1: Expression, expr2: Expression) {
         this.add({kind: ConstraintKind.EQUAL, expr1, expr2});
@@ -1156,7 +1207,7 @@ export class ConstraintSolver {
             }
             // TODO
             // if (eta1) {
-            //     addEqualConstraint(expr1.fn, makeLambda(expr2, expr1.arg, expr1.fn.));
+            //     this.addEqualConstraint(expr1.fn, makeLambda(expr2, expr1.arg, expr1.fn.));
             // }
             // if (expr1.arg.kind === ExpressionKind.SYMBOL && tempRegistry.isVariable(expr1.arg.symbol) && symbolFreeQ(expr1.fn, expr1.arg.symbol)) {
             //     if (fixedPoint || !argsContainsUninferedTemps(tempRegistry, expr1) && !containsUninferedTemps(tempRegistry, expr2)) {
@@ -1254,7 +1305,7 @@ export class ConstraintSolver {
                     this.addEqualConstraint(expr1, expr2);
                 } else {
                     logger.info(() => 'unchanged');
-                    this.constraints.push(con);
+                    this.add(con);
                 }
                 return changed;
             }
@@ -1262,7 +1313,7 @@ export class ConstraintSolver {
                 if (con.expr.value !== void 0 && this.setUnknown(con.target, this.getType(con.expr))) {
                     return true;
                 }
-                this.constraints.push(con);
+                this.add(con);
                 return false;
             }
             case ConstraintKind.FN_TYPE_TYPE: {
@@ -1279,7 +1330,7 @@ export class ConstraintSolver {
                 if (changed) {
                     con = {...con, type1, type2};
                 }
-                this.constraints.push(con);
+                this.add(con);
                 return changed;
             }
             case ConstraintKind.EQUAL_WITH_REPLACE: {
@@ -1290,7 +1341,7 @@ export class ConstraintSolver {
                     }
                     return true;
                 }
-                this.constraints.push(con);
+                this.add(con);
                 return false;
             }
             default: panic();
@@ -1303,6 +1354,7 @@ export class ConstraintSolver {
             done = true;
             const cons = this.constraints.slice(0);
             this.constraints.length = 0;
+            this.constraintUnknowns.clear();
             for (const con of cons) {
                 if (this.evaluateConstraint(con)) {
                     done = false;
@@ -1311,6 +1363,9 @@ export class ConstraintSolver {
             }
         }
         return ret;
+    }
+    isUnknownConstraint(expr: UnknownExpression) {
+        return this.constraintUnknowns.has(expr);
     }
     dump() {
         const ret: string[] = [];
@@ -1347,6 +1402,25 @@ const enum PollResult {
     DONE,
 }
 
+function convertRule(lhs: Expression, rhs: Expression): [Expression, Expression] {
+    lhs = mapExpression(lhs, {
+        enterScope(){},
+        leaveScope(){},
+        map(expr, info) {
+            if (expr.kind === ExpressionKind.UNKNOWN && expr.isPattern) {
+                assert(expr.value === void 0);
+                assert(expr.type !== void 0);
+                const s: VariableExpression = {kind: ExpressionKind.VARIABLE, defaultType: expr.type};
+                expr.value = s;
+                info.emit(s);
+                return;
+            }
+            info.emit(expr);
+        }
+    }) ?? panic();
+    return [lhs, copyExpression(rhs)];
+}
+
 type HIRPollAction = (self: HIRSolver) => PollResult;
 
 export class HIRSolver {
@@ -1374,7 +1448,7 @@ export class HIRSolver {
                     return ret;
                 }
                 while (fnType.kind === ExpressionKind.FN_TYPE && fnType.color !== value.color) {
-                    const tmp = makeUnknown(fnType.inputType);
+                    const tmp = makeUnknown(fnType.inputType, value.isPattern);
                     fn = {kind: ExpressionKind.CALL, fn, arg: tmp, color: fnType.color};
                     fnType = self.csolver.getType(fn);
                 }
@@ -1450,6 +1524,48 @@ export class HIRSolver {
             panic();
         };
     }
+    private pollSymbolRuleAction(value: HIRSymbolRule, loc: SourceRange | undefined, resolved: HIRResolvedData): HIRPollAction {
+        let hasTypeConstraint = false;
+        return self => {
+            let ret = PollResult.UNCHANGED;
+            const symbol = self.resolved[value.symbol].value;
+            const lhs = self.resolved[value.rule.lhs];
+            const rhs = self.resolved[value.rule.rhs];
+            if (lhs.value === void 0 || symbol === void 0) {
+                return ret;
+            }
+            assert(symbol.kind === ExpressionKind.SYMBOL);
+            if (rhs.value === void 0) {
+                if (rhs.type === void 0) {
+                    rhs.type = self.csolver.getType(lhs.value);
+                    ret = PollResult.CHANGED;
+                }
+                return ret;
+            }
+            if (!hasTypeConstraint) {
+                hasTypeConstraint = true;
+                self.csolver.addEqualConstraint(self.csolver.getType(lhs.value), self.csolver.getType(rhs.value));
+                return PollResult.CHANGED;
+            }
+            if (self.csolver.containsConstraintUnknown(lhs.value) || self.csolver.containsConstraintUnknown(rhs.value)) {
+                return ret;
+            }
+            const rule = convertRule(lhs.value, rhs.value);
+            if (value.isUpValue) {
+                if (symbol.upValues === void 0) {
+                    symbol.upValues = [];
+                }
+                symbol.upValues.push(rule);
+            } else {
+                if (symbol.downValues === void 0) {
+                    symbol.downValues = [];
+                }
+                symbol.downValues.push(rule);
+            }
+            resolved.value = self.csolver.builtins.unit;
+            return PollResult.DONE;
+        };
+    }
     private pollAction(index: number): HIRPollAction {
         const {value, loc} = this.regs[index];
         const resolved = this.resolved[index];
@@ -1502,12 +1618,12 @@ export class HIRSolver {
                     if (type0 === void 0) {
                         return PollResult.UNCHANGED;
                     }
-                    self.csolver.addEqualConstraint(this.csolver.getType(type0), self.csolver.builtins.makeUniverse(makeUnknown(self.csolver.builtins.levelType)));
+                    self.csolver.addEqualConstraint(this.csolver.getType(type0), self.csolver.builtins.makeUniverse(makeUnknown(self.csolver.builtins.levelType, false)));
                     type = type0;
                 } else {
                     type = makeUnknownType(self.csolver.builtins);
                 }
-                resolved.value = makeUnknown(type);
+                resolved.value = makeUnknown(type, false);
                 return PollResult.DONE;
             };
             case HIRKind.SYMBOL: return self => {
@@ -1570,11 +1686,10 @@ export class HIRSolver {
                 } else {
                     self.csolver.addEqualConstraint(symbol.type, type);
                 }
-
                 resolved.value = self.csolver.builtins.unit;
                 return PollResult.DONE;
             };
-            case HIRKind.SYMBOL_RULE: panic();
+            case HIRKind.SYMBOL_RULE: return this.pollSymbolRuleAction(value, loc, resolved);
             case HIRKind.MEMBER_ACCESS: return this.pollMemberAccessAction(value, loc, resolved);
             case HIRKind.LAMBDA: return this.pollLambdaAction(value, loc, resolved);
         }
