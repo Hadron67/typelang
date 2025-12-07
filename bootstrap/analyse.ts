@@ -92,6 +92,12 @@ export interface LambdaExpression {
     readonly loc?: SourceRange;
 }
 
+export interface LambdaHead {
+    readonly arg?: VariableExpression;
+    readonly argType: Expression;
+    readonly color: number;
+}
+
 export interface FnTypeExpression {
     readonly kind: ExpressionKind.FN_TYPE;
     readonly arg?: VariableExpression;
@@ -194,6 +200,7 @@ export class BuiltinSymbols {
     readonly levelMax: SymbolExpression;
 
     readonly untyped: SymbolExpression;
+    readonly errorType: SymbolExpression;
     readonly numberType: SymbolExpression;
     readonly stringType: SymbolExpression;
     readonly unitType: SymbolExpression;
@@ -282,6 +289,7 @@ export class BuiltinSymbols {
         this.levelType.type = u0;
 
         this.untyped = makeType('untyped');
+        this.errorType = makeType('error-type');
         this.numberType = makeType('number');
         this.stringType = makeType('string');
         this.unitType = makeType('void');
@@ -400,13 +408,17 @@ export class TypeSolver {
                 case ExpressionKind.CALL: {
                     self.doActions(self._getType(expr.fn), self => {
                         const fnType = unwrapUnknown(self.stack.pop()!);
-                        assert(fnType.kind === ExpressionKind.FN_TYPE);
-                        let type = fnType.outputType;
-                        if (fnType.arg !== void 0) {
-                            type = replaceScopeVariable(type, fnType.arg, expr.arg, self.csolver) ?? panic();
+                        if (fnType.kind === ExpressionKind.FN_TYPE) {
+                            let type = fnType.outputType;
+                            if (fnType.arg !== void 0) {
+                                type = replaceScopeVariable(type, fnType.arg, expr.arg, self.csolver) ?? panic();
+                            }
+                            self.cache.set(expr, type);
+                            self.stack.push(type);
+                        } else {
+                            self.cache.set(expr, self.builtins.errorType);
+                            self.stack.push(self.builtins.errorType);
                         }
-                        self.cache.set(expr, type);
-                        self.stack.push(type);
                     });
                     break;
                 }
@@ -518,7 +530,7 @@ export class ExpressionStringifier {
                 }
                 case ExpressionKind.CALL: {
                     const [fn, args, colors] = collectFnArgs(t);
-                    const needParenth = fn.kind !== ExpressionKind.SYMBOL && fn.kind !== ExpressionKind.UNKNOWN;
+                    const needParenth = fn.kind !== ExpressionKind.SYMBOL && fn.kind !== ExpressionKind.UNKNOWN && fn.kind !== ExpressionKind.VARIABLE && fn.kind !== ExpressionKind.CALL;
                     const length = args.length;
                     todo.push(stack => {
                         const args: string[] = [];
@@ -723,7 +735,7 @@ export class ExpressionMap {
                         if (expr.arg !== void 0) {
                             self.mapper.leaveScope(expr.arg, self);
                         }
-                        self.stack.push(body !== expr.body || argType !== expr.argType ? {...expr, argType, body} : body);
+                        self.stack.push(body !== expr.body || argType !== expr.argType ? {...expr, argType, body} : expr);
                     });
                     break;
                 }
@@ -797,44 +809,13 @@ function markExcludedVariable(expr: Expression, v: VariableExpression) {
 }
 
 export function replaceScopeVariable(expr: Expression, v: VariableExpression, replacement: Expression, solver: ConstraintSolver | undefined) {
-    return mapExpression(expr, {
-        enterScope(v, info) {
-            markExcludedVariable(replacement, v);
-        },
-        leaveScope() {},
-        map(expr, info) {
-            switch (expr.kind) {
-                case ExpressionKind.VARIABLE:
-                    if (expr === v) {
-                        info.emit(replacement);
-                        return;
-                    }
-                    break;
-                case ExpressionKind.UNKNOWN:
-                    if (!expr.excludedVariables.has(v)) {
-                        if (solver !== void 0) {
-                            if (expr.type !== void 0) {
-                                info.doActions(info.map(expr.type), self => {
-                                    self.emit(solver.makeReplaceUnknown(expr, self.pop(), v, replacement));
-                                });
-                            } else {
-                                info.emit(solver.makeReplaceUnknown(expr, void 0, v, replacement));
-                            }
-                        } else {
-                            const v2: UnknownExpression = {kind: ExpressionKind.UNKNOWN, type: expr.type, isPattern: false, excludedVariables: new Set()};
-                            expr.excludedVariables.forEach(v => v2.excludedVariables.add(v));
-                            info.emit(v2);
-                        }
-                        return;
-                    }
-                    break;
-            }
-            info.emit(expr);
-        },
-    }) ?? panic();
+    const reps = new Map<VariableExpression, Expression>();
+    reps.set(v, replacement);
+    return replaceScopeVariables(expr, reps, solver);
 }
 
-export function replaceScopeVariables(expr: Expression, reps: Map<VariableExpression, Expression>) {
+export function replaceScopeVariables(expr: Expression, reps: Map<VariableExpression, Expression>, solver: ConstraintSolver | undefined) {
+    const unknownCache = new Map<UnknownExpression, UnknownExpression>();
     return mapExpression(expr, {
         enterScope(v) {
             reps.forEach(rep => markExcludedVariable(rep, v));
@@ -846,18 +827,42 @@ export function replaceScopeVariables(expr: Expression, reps: Map<VariableExpres
                     const rep = reps.get(expr);
                     if (rep !== void 0) {
                         info.emit(rep);
+                        return;
                     }
                     break;
                 }
                 case ExpressionKind.UNKNOWN: {
-                    let contains = false;
+                    const repCache = unknownCache.get(expr);
+                    if (repCache !== void 0) {
+                        info.emit(repCache);
+                        return;
+                    }
+                    const filteredReps = new Map<VariableExpression, Expression>();
                     reps.forEach((v, k) => {
-                        if (expr.excludedVariables.has(k)) {
-                            contains = true;
+                        if (!expr.excludedVariables.has(k)) {
+                            filteredReps.set(k, v);
                         }
                     });
-                    if (contains) {
-                        info.terminate();
+                    if (filteredReps.size > 0) {
+                        if (solver !== void 0) {
+                            if (expr.type !== void 0) {
+                                info.doActions(info.map(expr.type), self => {
+                                    const type = self.pop();
+                                    const newUnknown = solver.makeReplaceUnknown(expr, type, filteredReps);
+                                    unknownCache.set(expr, newUnknown);
+                                    self.emit(newUnknown);
+                                });
+                            } else {
+                                const newUnknown = solver.makeReplaceUnknown(expr, void 0, filteredReps);
+                                unknownCache.set(expr, newUnknown);
+                                info.emit(newUnknown);
+                            }
+                        } else {
+                            const newUnknown: UnknownExpression = {kind: ExpressionKind.UNKNOWN, excludedVariables: new Set(), isPattern: expr.isPattern};
+                            expr.excludedVariables.forEach(v => newUnknown.excludedVariables.add(v));
+                            unknownCache.set(expr, newUnknown);
+                            info.emit(newUnknown);
+                        }
                         return;
                     }
                     break;
@@ -865,7 +870,7 @@ export function replaceScopeVariables(expr: Expression, reps: Map<VariableExpres
             }
             info.emit(expr);
         },
-    });
+    }) ?? panic();
 }
 
 export function freeQ(expr: Expression, predicate: (expr: Expression) => boolean) {
@@ -905,13 +910,7 @@ export function canUseEtaReduction(expr: CallExpression) {
     if (arg.kind !== ExpressionKind.VARIABLE) {
         return false;
     }
-    let expr0 = expr.fn;
-    while (expr0.kind === ExpressionKind.CALL) {
-        if (!variableFreeQ(expr0.arg, arg)) {
-            return false;
-        }
-    }
-    return true;
+    return variableFreeQ(expr.fn, arg);
 }
 
 export function sameQ(expr1: Expression, expr2: Expression) {
@@ -983,6 +982,9 @@ export function matchPattern(pattern: Expression, expr: Expression) {
         const expr = todo.pop()!;
         const pattern = todo.pop()!;
         switch (pattern.kind) {
+            case ExpressionKind.SYMBOL:
+                if (expr !== pattern) return null;
+                break;
             case ExpressionKind.STRING:
             case ExpressionKind.NUMBER:
             case ExpressionKind.LAMBDA:
@@ -1008,6 +1010,7 @@ export function matchPattern(pattern: Expression, expr: Expression) {
                 }
                 todo.push(pattern.arg, expr.arg, pattern.fn, expr.fn);
                 break;
+            case ExpressionKind.UNKNOWN: return null;
             default: panic();
         }
     }
@@ -1060,14 +1063,22 @@ export interface EqualWithReplaceConstraint {
     readonly kind: ConstraintKind.EQUAL_WITH_REPLACE;
     readonly target: UnknownExpression;
     readonly expr: UnknownExpression;
-    readonly variable: VariableExpression;
-    readonly replacement: Expression;
+    readonly replaces: Map<VariableExpression, Expression>;
 }
 
 export interface TypeofConstraint {
     readonly kind: ConstraintKind.TYPEOF;
     readonly target: UnknownExpression;
     readonly expr: UnknownExpression;
+}
+
+function markRenamedVariable(from: VariableExpression, to: VariableExpression, expr: Expression) {
+    visitExpression(expr, expr => {
+        if (expr.kind === ExpressionKind.UNKNOWN && expr.excludedVariables.has(from)) {
+            expr.excludedVariables.add(to);
+        }
+        return false;
+    });
 }
 
 export class ConstraintSolver {
@@ -1101,7 +1112,7 @@ export class ConstraintSolver {
                 break;
             case ConstraintKind.EQUAL_WITH_REPLACE:
                 this.constraintUnknowns.add(con.target);
-                this.scanUnknowns(con.replacement);
+                con.replaces.forEach(v => this.scanUnknowns(v));
                 break;
             case ConstraintKind.FN_TYPE_TYPE:
                 this.constraintUnknowns.add(con.target);
@@ -1132,11 +1143,28 @@ export class ConstraintSolver {
     setType(expr: Expression, type: Expression) {
         this.typeCache.set(expr, type);
     }
-    makeReplaceUnknown(expr: UnknownExpression, type: Expression | undefined, v: VariableExpression, replacement: Expression) {
+    makeReplaceUnknown(expr: UnknownExpression, type: Expression | undefined, replaces: Map<VariableExpression, Expression>) {
         const ret: UnknownExpression = {kind: ExpressionKind.UNKNOWN, type, excludedVariables: new Set(), isPattern: false};
         expr.excludedVariables.forEach(v => ret.excludedVariables.add(v));
-        this.add({kind: ConstraintKind.EQUAL_WITH_REPLACE, target: ret, expr, variable: v, replacement});
+        this.add({kind: ConstraintKind.EQUAL_WITH_REPLACE, target: ret, expr, replaces});
         return ret;
+    }
+    makeLambda(body: Expression, arg: VariableExpression, argType: Expression, color: number): Expression {
+        if (body.kind === ExpressionKind.CALL && body.color === color && body.arg.kind === ExpressionKind.VARIABLE && body.arg === arg && variableFreeQ(body.fn, arg)) {
+            return body.fn;
+        } else {
+            const newArg: VariableExpression | undefined = variableFreeQ(body, arg) ? void 0 : {
+                kind: ExpressionKind.VARIABLE,
+                defaultType: argType,
+            };
+            return {
+                kind: ExpressionKind.LAMBDA,
+                arg: newArg,
+                argType,
+                body: newArg !== void 0 ? (replaceScopeVariable(body, arg, newArg, this) ?? panic()) : body,
+                color,
+            };
+        }
     }
     private evaluateEqualConstraint(expr1: Expression, expr2: Expression) {
         const {logger, stringifier} = this;
@@ -1165,7 +1193,11 @@ export class ConstraintSolver {
             if (expr1.type !== void 0) {
                 this.addEqualConstraint(expr1.type, this.getType(expr2));
             }
-            logger.info(() => `setting unknown ${stringifier.stringify(expr1)} = ${stringifier.stringify(expr2)}`);
+            logger.info(() => {
+                let excluded: string[] = [];
+                (expr1 as UnknownExpression).excludedVariables.forEach(v => excluded.push(this.stringifier.stringify(v)));
+                return `setting unknown ${stringifier.stringify(expr1)} = ${stringifier.stringify(expr2)}, excluded = {${excluded.join(', ')}}`;
+            });
             expr1.value = expr2;
             return true;
         }
@@ -1197,6 +1229,17 @@ export class ConstraintSolver {
                         }
                     }
                 }
+                if (fn1.kind === ExpressionKind.VARIABLE && fn2.kind === ExpressionKind.VARIABLE) {
+                    if (fn1 !== fn2) {
+                        this.erroredConstraints.push({kind: ConstraintKind.EQUAL, expr1, expr2});
+                    } else {
+                        for (let i = 0; i < args1.length; i++) {
+                            this.addEqualConstraint(args1[i], args2[i]);
+                        }
+                        this.addEqualConstraint(this.getType(expr1), this.getType(expr2));
+                    }
+                    return true;
+                }
             }
             let eta1 = canUseEtaReduction(expr1);
             if (!eta1 && expr2.kind === ExpressionKind.CALL && canUseEtaReduction(expr2)) {
@@ -1205,10 +1248,11 @@ export class ConstraintSolver {
                 expr1 = expr2;
                 expr2 = t;
             }
-            // TODO
-            // if (eta1) {
-            //     this.addEqualConstraint(expr1.fn, makeLambda(expr2, expr1.arg, expr1.fn.));
-            // }
+            if (eta1) {
+                assert(expr1.arg.kind === ExpressionKind.VARIABLE);
+                this.addEqualConstraint(expr1.fn, this.makeLambda(expr2, expr1.arg, this.getType(expr1.arg), expr1.color));
+                return true;
+            }
             // if (expr1.arg.kind === ExpressionKind.SYMBOL && tempRegistry.isVariable(expr1.arg.symbol) && symbolFreeQ(expr1.fn, expr1.arg.symbol)) {
             //     if (fixedPoint || !argsContainsUninferedTemps(tempRegistry, expr1) && !containsUninferedTemps(tempRegistry, expr2)) {
             //         addEqualConstraint(expr1.fn, makeLambda(expr2, expr1.arg, typeOfExpression0(expr1.fn)), source);
@@ -1228,12 +1272,16 @@ export class ConstraintSolver {
             let output1 = expr1.outputType;
             let output2 = expr2.outputType;
             if (expr1.arg !== void 0) {
-                output1 = replaceScopeVariable(output1, expr1.arg, arg ?? panic(), this);
+                assert(arg !== void 0);
+                markRenamedVariable(expr1.arg, arg, output1);
+                output1 = replaceScopeVariable(output1, expr1.arg, arg, this);
             }
             if (expr2.arg !== void 0) {
-                output2 = replaceScopeVariable(output2, expr2.arg, arg ?? panic(), this);
+                assert(arg !== void 0);
+                markRenamedVariable(expr2.arg, arg, output2);
+                output2 = replaceScopeVariable(output2, expr2.arg, arg, this);
             }
-            this.addEqualConstraint(expr1.outputType, output2);
+            this.addEqualConstraint(output1, output2);
             return true;
         }
         if (expr1.kind === ExpressionKind.LAMBDA && expr2.kind === ExpressionKind.LAMBDA) {
@@ -1247,10 +1295,14 @@ export class ConstraintSolver {
                 arg = {kind: ExpressionKind.VARIABLE, defaultType: expr2.argType};
             }
             if (expr1.arg !== void 0) {
-                body1 = replaceScopeVariable(body1, expr1.arg, arg ?? panic(), this);
+                assert(arg !== void 0);
+                markRenamedVariable(expr1.arg, arg, body1);
+                body1 = replaceScopeVariable(body1, expr1.arg, arg, this);
             }
             if (expr2.arg !== void 0) {
-                body2 = replaceScopeVariable(body2, expr2.arg, arg ?? panic(), this);
+                assert(arg !== void 0);
+                markRenamedVariable(expr2.arg, arg, body2);
+                body2 = replaceScopeVariable(body2, expr2.arg, arg, this);
             }
             this.addEqualConstraint(body1, body2);
             return true;
@@ -1284,6 +1336,7 @@ export class ConstraintSolver {
     private evaluateConstraint(con: Constraint) {
         const {logger, stringifier} = this;
         const evaluator = new Evaluator(this.builtins, this);
+        this.logger.info(() => `evaluating constraint ${dumpConstraint(con, this.stringifier)}`);
         switch (con.kind) {
             case ConstraintKind.EQUAL: {
                 const oldExpr1 = con.expr1;
@@ -1335,7 +1388,7 @@ export class ConstraintSolver {
             }
             case ConstraintKind.EQUAL_WITH_REPLACE: {
                 if (con.expr.value !== void 0) {
-                    const rep = replaceScopeVariable(con.expr.value, con.variable, con.replacement, this);
+                    const rep = replaceScopeVariables(con.expr.value, con.replaces, this);
                     if (!this.setUnknown(con.target, rep)) {
                         this.erroredConstraints.push(con);
                     }
@@ -1389,7 +1442,11 @@ export class ConstraintSolver {
 export function dumpConstraint(con: Constraint, reg: ExpressionStringifier) {
     switch (con.kind) {
         case ConstraintKind.EQUAL: return `${reg.stringify(con.expr1)} === ${reg.stringify(con.expr2)}`;
-        case ConstraintKind.EQUAL_WITH_REPLACE: return `${reg.stringify(con.target)} === ${reg.stringify(con.expr)} /. ${reg.stringify(con.variable)} -> ${reg.stringify(con.replacement)}`;
+        case ConstraintKind.EQUAL_WITH_REPLACE: {
+            const reps: string[] = [];
+            con.replaces.forEach((v, k) => reps.push(`${reg.stringify(k)} -> ${reg.stringify(v)}`));
+            return `${reg.stringify(con.target)} === ${reg.stringify(con.expr)} /. ${reps.length === 1 ? reps[0] : `{${reps.join(', ')}}`}`;
+        }
         case ConstraintKind.FN_TYPE_TYPE: return `${reg.stringify(con.target)} === #fn-type-type(${reg.stringify(con.type1)}, ${reg.stringify(con.type2)})`;
         case ConstraintKind.TYPEOF: return `${reg.stringify(con.target)} === #typeof(${reg.stringify(con.expr)})`;
         default: panic();
@@ -1449,18 +1506,20 @@ export class HIRSolver {
                 }
                 while (fnType.kind === ExpressionKind.FN_TYPE && fnType.color !== value.color) {
                     const tmp = makeUnknown(fnType.inputType, value.isPattern);
+                    self.csolver.logger.info(() => `create tmp ${self.csolver.stringifier.stringify(tmp)}: ${self.csolver.stringifier.stringify((fnType as FnTypeExpression).inputType)}`);
                     fn = {kind: ExpressionKind.CALL, fn, arg: tmp, color: fnType.color};
                     fnType = self.csolver.getType(fn);
                 }
                 tmpInsertedFn = fn;
                 ret = PollResult.CHANGED;
             }
-            const fnType = self.csolver.getType(tmpInsertedFn);
+            const fnType = unwrapUnknown(self.csolver.getType(tmpInsertedFn));
             assert(fnType.kind === ExpressionKind.FN_TYPE);
             const arg = self.resolved[value.arg];
             if (arg.value === void 0) {
                 if (arg.type === void 0) {
                     arg.type = fnType.inputType;
+                    ret = PollResult.CHANGED;
                 }
                 return ret;
             }
@@ -1505,10 +1564,7 @@ export class HIRSolver {
             if (lhs.kind === ExpressionKind.SYMBOL) {
                 if (lhs.subSymbols !== void 0 && lhs.subSymbols.has(value.name)) {
                     const s = lhs.subSymbols.get(value.name) ?? panic();
-                    if (s.value === void 0 || s.type === void 0) {
-                        return PollResult.UNCHANGED;
-                    }
-                    resolved.value = s.value;
+                    resolved.value = s;
                     return PollResult.DONE;
                 }
             }
@@ -1516,12 +1572,92 @@ export class HIRSolver {
         };
     }
     private pollLambdaAction(value: HIRLambda, loc: SourceRange | undefined, resolved: HIRResolvedData): HIRPollAction {
+        const args: LambdaHead[] = [];
+        let bodyType: Expression | undefined = void 0;
         return self => {
-            const type = unwrapUnknownNullable(resolved.type);
-            if (type === void 0 || type.kind !== ExpressionKind.FN_TYPE) {
-                return PollResult.UNCHANGED;
+            let ret = PollResult.UNCHANGED;
+            if (bodyType === void 0) {
+                let arg: VariableExpression | undefined = void 0;
+                let argType: Expression | undefined = void 0;
+                if (value.arg !== void 0) {
+                    const arg0 = self.resolved[value.arg].value;
+                    if (arg0 === void 0) {
+                        return PollResult.UNCHANGED;
+                    }
+                    assert(arg0.kind === ExpressionKind.VARIABLE);
+                    arg = arg0;
+                }
+                if (value.argType !== void 0) {
+                    argType = self.resolved[value.argType].value;
+                    if (argType === void 0) {
+                        return PollResult.UNCHANGED;
+                    }
+                }
+                let type = unwrapUnknownNullable(resolved.type);
+                if (type === void 0 || type.kind !== ExpressionKind.FN_TYPE || !checkFnTypeColor(type, value.color)) {
+                    return PollResult.UNCHANGED;
+                }
+                while (value.color !== type.color) {
+                    const newArg: VariableExpression = {
+                        kind: ExpressionKind.VARIABLE,
+                        defaultType: type.inputType,
+                    };
+                    // looks like typescript's CFA is broken here...
+                    let outputType: Expression = type.outputType;
+                    if (type.arg !== void 0) {
+                        outputType = replaceScopeVariable(outputType, type.arg, newArg, self.csolver);
+                    }
+                    args.push({
+                        arg: newArg,
+                        argType: type.inputType,
+                        color: type.color,
+                    });
+                    assert(outputType.kind === ExpressionKind.FN_TYPE);
+                    type = outputType;
+                }
+                if (arg !== void 0 || type.arg !== void 0) {
+                    if (arg === void 0) {
+                        arg = {kind: ExpressionKind.VARIABLE, defaultType: type.inputType};
+                    }
+                    args.push({
+                        arg,
+                        argType: type.inputType,
+                        color: value.color,
+                    });
+                    if (type.arg !== void 0) {
+                        type = replaceScopeVariable(type.outputType, type.arg, arg, self.csolver);
+                    } else {
+                        type = type.outputType;
+                    }
+                } else {
+                    args.push({argType: type.inputType, color: value.color});
+                    type = type.outputType;
+                }
+                ret = PollResult.CHANGED;
+                bodyType = type;
             }
-            panic();
+            const body = self.resolved[value.body];
+            if (body.value === void 0) {
+                if (body.type === void 0) {
+                    body.type = bodyType;
+                    ret = PollResult.CHANGED;
+                }
+                return ret;
+            }
+            self.csolver.addEqualConstraint(self.csolver.getType(body.value), bodyType);
+            let retValue = body.value;
+            for (let i = 0; i < args.length; i++) {
+                const arg = args[args.length - 1 - i];
+                retValue = {
+                    kind: ExpressionKind.LAMBDA,
+                    argType: arg.argType,
+                    arg: arg.arg,
+                    color: arg.color,
+                    body: retValue,
+                };
+            }
+            resolved.value = retValue;
+            return PollResult.DONE;
         };
     }
     private pollSymbolRuleAction(value: HIRSymbolRule, loc: SourceRange | undefined, resolved: HIRResolvedData): HIRPollAction {
@@ -1638,7 +1774,7 @@ export class HIRSolver {
                 } else {
                     parent = self.root;
                 }
-                const type = 0 !== (value.flags & SymbolFlags.ALLOW_DEF_TYPE) ? makeUnknownType(self.csolver.builtins) : self.csolver.builtins.untyped;
+                const type = 0 !== (value.flags & (SymbolFlags.ALLOW_DEF_TYPE | SymbolFlags.ALLOW_ASSIGNMENT)) ? makeUnknownType(self.csolver.builtins) : self.csolver.builtins.untyped;
                 resolved.value = {
                     kind: ExpressionKind.SYMBOL,
                     parent,
@@ -2455,6 +2591,11 @@ export class Evaluator {
                 case ExpressionKind.LAMBDA: {
                     self.doActions(self._evaluate(expr.body), self => {
                         const body = self.stack.pop()!;
+                        // eta reduction
+                        if (expr.arg !== void 0 && body.kind === ExpressionKind.CALL && canUseEtaReduction(body) && body.arg === expr.arg) {
+                            self.stack.push(body.fn);
+                            return;
+                        }
                         if (body !== expr.body) {
                             self.stack.push({...expr, body});
                         } else {
@@ -2493,7 +2634,8 @@ export class Evaluator {
                 for (const [lhs, rhs] of collectRules(expr)) {
                     const reps = matchPattern(lhs, expr);
                     if (reps !== null) {
-                        panic("TODO");
+                        self.doActions(self._evaluate(replaceScopeVariables(rhs, reps, self.csolver)));
+                        return;
                     }
                 }
             }

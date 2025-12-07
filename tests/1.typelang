@@ -2,25 +2,22 @@ module Eq {
     Self: [n, T: Type(n)] -> T -> T -> Type(n);
     refl: [n, T: Type(n)](x: T) -> Self(x, x);
 
-    ind: [n, T: Type(n), C: [x: T, y] -> Self(x, y) -> Type(n)] -> ((x: T) -> C(refl(x))) -> [x, y](p: Self(x, y)) -> C(p);
-    ind(?c0, refl(?x)) = c0(x);
-
     inv: [n, T: Type(n), x: T, y] -> Self(x, y) -> Self(y, x);
-    inv(refl(?x)) = refl(x);
+    inv(refl(?)) = refl(_);
 
     concat: [n, T: Type(n), x: T, y, z] -> Self(x, y) -> Self(y, z) -> Self(x, z);
-    concat(refl(?x), refl(?x)) = refl(x);
+    concat(refl(?x), refl(?x)) = refl(_);
 
-    transport: [n, n', T: Type(n), x: T, y, P: T -> Type(n')] -> Self(x, y) -> P(x) -> P(y);
-    transport(refl(?), ?p0) = p0;
+    transport: [n, n', T: Type(n), x: T, y](P: T -> Type(n')) -> Self(x, y) -> P(x) -> P(y);
+    transport(?, refl(?), ?p0) = p0;
 
-    transportconst: [n, n', A: Type(n), B: Type(n'), x: A, y](p: Self(x, y), b: B) -> Self(transport(p, b), b);
+    transportconst: [n, n', A: Type(n), B: Type(n'), x: A, y](p: Self(x, y), b: B) -> Self(transport(\_ B, p, b), b);
     transportconst(refl(?x), ?b) = refl(b);
 
     ap: [n, n', A: Type(n), B: Type(n'), x: A, y](f: A -> B, p: Self(x, y)) -> Self(f(x), f(y));
     ap(?, refl(?)) = refl(_);
 
-    apd: [n, n', A: Type(n), B: A -> Type(n'), x: A, y](f: (x: A) -> B(x), p: Self(x, y)) -> Self(transport(p, f(x)), f(y));
+    apd: [n, n', A: Type(n), B: A -> Type(n'), x: A, y](f: (x: A) -> B(x), p: Self(x, y)) -> Self(transport(B, p, f(x)), f(y));
     apd(?, refl(?)) = refl(_);
 
     module lemma-2-1-4 {
@@ -37,16 +34,14 @@ module Eq {
     lemma-2-3-8: [n, n', A: Type(n), B: Type(n'), x: A, y](f: A -> B, p: Self(x, y)) -> Self(apd(f, p), concat(transportconst(p, f(x)), ap(f, p)));
     lemma-2-3-8(?, refl(?)) = refl(_);
 
-    lemma-2-3-9: [n, n', A: Type(n), P: A -> Type(n'), x: A, y: A, z, u: P(x)](p: Self(x, y), q: Self(y, z)) -> Self(transport(q, transport(p, u)), transport(concat(p, q), u));
+    lemma-2-3-9: [n, n', A: Type(n), P: A -> Type(n'), x: A, y: A, z, u: P(x)](p: Self(x, y), q: Self(y, z)) -> Self(transport(P, q, transport(P, p, u)), transport(P, concat(p, q), u));
     lemma-2-3-9(refl(?x), refl(?x)) = refl(_);
 
-    lemma-2-3-10: [n1, n2, n3, A: Type(n1), B: Type(n2), f: A -> B, P: B -> Type(n3), x: A, y](p: Self(x, y), u: P(f(x))) -> Self(transport(p, u), transport(ap(f, p), u));
+    lemma-2-3-10: [n1, n2, n3, A: Type(n1), B: Type(n2), f: A -> B, P: B -> Type(n3), x: A, y](p: Self(x, y), u: P(f(x))) -> Self(transport(\x P(f(x)), p, u), transport(P, ap(f, p), u));
     lemma-2-3-10(refl(?), ?) = refl(_);
 
-    lemma-2-3-11: [n, n1, n2, A: Type(n), P: A -> Type(n1), Q: A -> Type(n2), f: (x: A) -> P(x) -> Q(x), x: A, y](p: Self(x, y), u: P(x)) -> Self(transport(p, f(x, u)), f(y, transport(p, u)));
+    lemma-2-3-11: [n, n1, n2, A: Type(n), P: A -> Type(n1), Q: A -> Type(n2), f: (x: A) -> P(x) -> Q(x), x: A, y](p: Self(x, y), u: P(x)) -> Self(transport(Q, p, f(x, u)), f(y, transport(P, p, u)));
     lemma-2-3-11(refl(?), ?) = refl(_);
-
-    fnext: [n, A: Type(n), B: A -> Type(n), f: (x: A) -> B(x), g: (x: A) -> B(x)] -> ((x: A) -> Self(f(x), g(x))) -> Self(f, g);
 }
 
 module Sum {
@@ -56,6 +51,46 @@ module Sum {
     first(pair(?a, ?b)) = a;
     second: [n, A: Type(n), B: A -> Type(n)] -> (self: Self(A, B)) -> B(first(self));
     second(pair(?a, ?b)) = b;
+}
+
+module Nat {
+    Self: Type(0);
+    zero: Self;
+    succ: Self -> Self;
+
+    plus: Self -> Self -> Self;
+    plus(?x, zero) = x;
+    plus(?x, succ(?y)) = succ(plus(x, y));
+
+    module plus-lemma {
+        l1: (x: Nat) -> Eq(x, plus(zero, x));
+        l1(zero) = Eq.refl(_);
+        l1(succ(?x)) = Eq.ap(succ, l1(x));
+
+        l2: (x: Nat, y: Nat) -> Eq(succ(plus(x, y)), plus(succ(x), y));
+        l2(?x, zero) = Eq.refl(_);
+        l2(?x, succ(?y)) = Eq.ap(succ, l2(x, y));
+
+        commu: (x: Nat, y: Nat) -> Eq(plus(x, y), plus(y, x));
+        commu(?x, zero) = l1(x);
+        commu(?x, succ(?y)) = Eq.concat(Eq.ap(succ, commu(x, y)), l2(y, x));
+
+        assoc: (x: Nat, y: Nat, z: Nat) -> Eq(plus(plus(x, y), z), plus(x, plus(y, z)));
+        assoc(?x, ?y, zero) = Eq.refl(_);
+        assoc(?x, ?y, succ(?z)) = Eq.ap(succ, assoc(x, y, z));
+    }
+
+    mul: Self -> Self -> Self;
+    mul(?x, zero) = zero;
+    mul(?x, succ(?y)) = plus(mul(x, y), x);
+
+    module mul-lemma {
+        l0: (x: Nat, y: Nat, z: Nat) -> Eq(plus(plus(x, y), z), plus(plus(x, z), y));
+        l0(?x, ?y, ?z) = Eq.concat(Eq.concat(plus-lemma.assoc(x, y, z), Eq.ap(\y plus(x, y), plus-lemma.commu(y, z))), Eq.inv(plus-lemma.assoc(x, z, y)));
+
+        l1: (x: Nat, y: Nat) -> Eq(plus(mul(x, y), y), mul(succ(x), y));
+        l1(?x, zero) = Eq.refl(_);
+    }
 }
 
 module S1 {
@@ -69,77 +104,4 @@ module S1 {
         f-eq: [n, A: Type(n), a: A](p: Eq(a, a)) -> Eq(Eq.apd(f(p), loop), Eq.concat(Eq.transportconst(loop, a), p));
         col: [n, A: Type(n), a: A](p: Eq(a, a)) -> Eq(Eq.ap(f(p), loop), p);
     }
-}
-
-module Nat {
-    Self: Type(0);
-    zero: Self;
-    succ: Self -> Self;
-
-    eq-succ: [x: Nat, y: Nat] -> Eq(x, y) -> Eq(succ(x), succ(y));
-    eq-succ(Eq.refl(?)) = Eq.refl(_);
-
-    max: Self -> Self -> Self;
-    max(?x, zero) = x;
-    max(zero, ?x) = x;
-    max(succ(?x), succ(?y)) = succ(max(x, y));
-
-    plus: Self -> Self -> Self;
-    plus(?x, zero) = x;
-    plus(?x, succ(?y)) = succ(plus(x, y));
-
-    module plus-lemma {
-        l1: (x: Nat) -> Eq(x, plus(zero, x));
-        l1(zero) = Eq.refl(_);
-        l1(succ(?x)) = eq-succ(l1(x));
-
-        l2: (x: Nat, y: Nat) -> Eq(succ(plus(x, y)), plus(succ(x), y));
-        l2(?x, zero) = Eq.refl(_);
-        l2(?x, succ(?y)) = eq-succ(l2(x, y));
-
-        commu: (x: Nat, y: Nat) -> Eq(plus(x, y), plus(y, x));
-        commu(?x, zero) = l1(x);
-        commu(?x, succ(?y)) = Eq.concat(eq-succ(commu(x, y)), l2(y, x));
-    }
-
-    times: Self -> Self -> Self;
-    times(?x, zero) = zero;
-    times(?x, succ(?y)) = plus(times(x, y), x);
-
-    module times-lemma {
-        l1: (x: Nat) -> Eq(times(zero, x), zero);
-        l1(zero) = Eq.refl(_);
-        l1(succ(?x)) = l1(x);
-
-        commu: (x: Nat, y: Nat) -> Eq(times(x, y), times(y, x));
-    }
-
-    one = succ(zero);
-    two = succ(succ(zero));
-    three = succ(two);
-    four = succ(three);
-    _: Eq(plus(two, two), four) = Eq.refl(_);
-}
-
-module Empty {
-    Self: Type(0);
-    ind: [n] -> (C: Self -> Type(n)) -> (x: Self) -> C(x);
-}
-
-module Bad {
-    Self: Type(0);
-    bad: (Self -> Empty) -> Self;
-
-    bad-is-false: Self -> Empty;
-    bad-is-false(bad(?f)) = f(bad(f));
-
-    bad-is-true: Self = bad(bad-is-false);
-
-    boom: Empty = bad-is-false(bad-is-true);
-}
-
-module List {
-    Self: [n] -> Type(n) -> Type(n);
-    empty: [n](T: Type(n)) -> Self(T);
-    append: [n, T: Type(n)] -> Self(T) -> T -> Self(T);
 }

@@ -84,7 +84,7 @@ export interface HIRLambda {
     readonly kind: HIRKind.LAMBDA;
     readonly arg?: HIRReg;
     readonly body: HIRReg;
-    readonly color?: number;
+    readonly color: number;
     readonly argType?: HIRReg;
 }
 
@@ -232,8 +232,6 @@ function findRuleTag(expr: AstCall, scope: Map<string, HIRReg>): [HIRReg, boolea
 
 const CCODE_I = 'i'.charCodeAt(0);
 
-type PatternResolver = (name: AstIdentifier | undefined, isPattern: boolean) => HIRReg | null;
-
 export function irgen(inputAst: Ast[], initialScope: Map<string, SymbolExpression>, builtins: BuiltinSymbols): Either<HIRHost, SourceRangeMessage[]> {
     const scopes: Map<string, HIRReg>[] = [];
     const diagnostics: SourceRangeMessage[] = [];
@@ -322,12 +320,12 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, SymbolExpressio
             case AstKind.LAMBDA: {
                 let arg: HIRReg | undefined = void 0;
                 if (expr.arg.name !== '_') {
-                    const arg = hir.emit({kind: HIRKind.VARIABLE, name: expr.arg.name}, expr.arg);
+                    arg = hir.emit({kind: HIRKind.VARIABLE, name: expr.arg.name}, expr.arg);
                     const newScope = new Map<string, HIRReg>();
                     newScope.set(expr.arg.name, arg);
                     scopes.push(newScope);
                 }
-                const ret = hir.emit({kind: HIRKind.LAMBDA, arg, body: genExpression(expr.body)}, loc);
+                const ret = hir.emit({kind: HIRKind.LAMBDA, arg, body: genExpression(expr.body), color: expr.color}, loc);
                 if (arg !== void 0) {
                     scopes.pop();
                 }

@@ -285,6 +285,7 @@ export interface AstLambda extends SourceRange {
     readonly kind: AstKind.LAMBDA;
     readonly body: Ast;
     readonly arg: AstIdentifier;
+    readonly color: number;
 }
 
 export interface AstTypedLambda extends SourceRange {
@@ -678,7 +679,7 @@ export function parse(source: string, file: FileId): Either<Ast[], SourceRangeMe
             nextToken();
             const name = parseIdentifier();
             const body = parseExpression();
-            return {kind: AstKind.LAMBDA, arg: name, body, file, start: s, length: token.start - s};
+            return {kind: AstKind.LAMBDA, arg: name, body, file, color: 0, start: s, length: token.start - s};
         }
         return parseFnType();
     }

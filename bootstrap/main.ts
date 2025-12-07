@@ -36,14 +36,13 @@ async function run(entry: string, logger: Logger) {
         const solver = new HIRSolver(root, parseResult.value.regs, csolver);
         solver.run();
         const diag = solver.collectDiagnostics();
+        logger.info(() => stringifier.dumpSymbol(root));
         if (diag.length > 0) {
             for (const d of diag) {
                 for (const line of renderTypeCheckDiagnostic(d, stringifier)) {
                     console.log(line);
                 }
             }
-        } else {
-            logger.info(() => stringifier.dumpSymbol(root));
         }
     } else {
         for (const msg of parseResult.value) {
