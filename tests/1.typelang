@@ -58,11 +58,11 @@ module Nat {
     zero: Self;
     succ: Self -> Self;
 
-    plus: Self -> Self -> Self;
-    plus(?x, zero) = x;
-    plus(?x, succ(?y)) = succ(plus(x, y));
+    module plus {
+        Self: Nat -> Nat -> Nat;
+        Self(?x, zero) = x;
+        Self(?x, succ(?y)) = succ(plus(x, y));
 
-    module plus-lemma {
         l1: (x: Nat) -> Eq(x, plus(zero, x));
         l1(zero) = Eq.refl(_);
         l1(succ(?x)) = Eq.ap(succ, l1(x));
@@ -80,17 +80,40 @@ module Nat {
         assoc(?x, ?y, succ(?z)) = Eq.ap(succ, assoc(x, y, z));
     }
 
-    mul: Self -> Self -> Self;
-    mul(?x, zero) = zero;
-    mul(?x, succ(?y)) = plus(mul(x, y), x);
+    module mul {
+        Self: Nat -> Nat -> Nat;
+        Self(?x, zero) = zero;
+        Self(?x, succ(?y)) = plus(mul(x, y), x);
 
-    module mul-lemma {
         l0: (x: Nat, y: Nat, z: Nat) -> Eq(plus(plus(x, y), z), plus(plus(x, z), y));
-        l0(?x, ?y, ?z) = Eq.concat(Eq.concat(plus-lemma.assoc(x, y, z), Eq.ap(\y plus(x, y), plus-lemma.commu(y, z))), Eq.inv(plus-lemma.assoc(x, z, y)));
+        l0(?x, ?y, ?z) = Eq.concat(Eq.concat(plus.assoc(x, y, z), Eq.ap(\y plus(x, y), plus.commu(y, z))), Eq.inv(plus.assoc(x, z, y)));
 
-        l1: (x: Nat, y: Nat) -> Eq(plus(mul(x, y), y), mul(succ(x), y));
-        l1(?x, zero) = Eq.refl(_);
+        l1: (x: Nat) -> Eq(zero, mul(zero, x));
+        l1(zero) = Eq.refl(_);
+        l1(succ(?x)) = l1(x);
+
+        l2: (x: Nat, y: Nat) -> Eq(plus(mul(x, y), y), mul(succ(x), y));
+        l2(?x, zero) = Eq.refl(_);
+        l2(?x, succ(?y)) = Eq.ap(succ, Eq.concat(l0(mul(x, y), x, y), Eq.ap(\y plus(y, x), l1(x, y))));
+
+        commu: (x: Nat, y: Nat) -> Eq(mul(x, y), mul(y, x));
+        commu(?x, zero) = l1(x);
+        commu(?x, succ(?y)) = Eq.concat(Eq.ap(\y plus(y, x), commu(x, y)), l2(y, x));
+
+        distro: (x: Nat, y: Nat, z: Nat) -> Eq(mul(x, plus(y, z)), plus(mul(x, y), mul(x, z)));
+        distro(?x, ?y, zero) = Eq.refl(_);
+        distro(?x, ?y, succ(?z)) = Eq.concat(Eq.ap(\y plus(y, x), distro(x, y, z)), plus.assoc(mul(x, y), mul(x, z), x));
+
+        assoc: (x: Nat, y: Nat, z: Nat) -> Eq(mul(mul(x, y), z), mul(x, mul(y, z)));
+        assoc(?x, ?y, zero) = Eq.refl(_);
+        assoc(?x, ?y, succ(?z)) = Eq.concat(Eq.ap(\z plus(z, mul(x, y)), assoc(x, y, z)), Eq.inv(distro(x, mul(y, z), y)));
     }
+}
+
+module Int {
+    Self: Type(0);
+    pos: Nat -> Self;
+    neg: Nat -> Self;
 }
 
 module S1 {
@@ -104,4 +127,18 @@ module S1 {
         f-eq: [n, A: Type(n), a: A](p: Eq(a, a)) -> Eq(Eq.apd(f(p), loop), Eq.concat(Eq.transportconst(loop, a), p));
         col: [n, A: Type(n), a: A](p: Eq(a, a)) -> Eq(Eq.ap(f(p), loop), p);
     }
+}
+
+module Vec3 {
+    Self: [n] -> Type(n) -> Type(n);
+    new: [n, T: Type(n)] -> T -> T -> T -> Self(T);
+
+    getX: [n, T: Type(n)] -> Self(T) -> T;
+    getX(new(?x, ?, ?)) = x;
+
+    getY: [n, T: Type(n)] -> Self(T) -> T;
+    getY(new(?, ?y, ?)) = y;
+
+    getZ: [n, T: Type(n)] -> Self(T) -> T;
+    getZ(new(?, ?, ?z)) = z;
 }

@@ -412,6 +412,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, SymbolExpressio
     function genModuleBody(self: HIRReg, decls: Ast[]) {
         selfStack.push(self);
         const scope = new Map<string, HIRReg>();
+        scope.set('Self', self);
         for (const decl of decls) {
             const name = getDeclName(decl);
             if (name !== 'Self' && name !== null && name !== '_' && !scope.has(name)) {
@@ -426,9 +427,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, SymbolExpressio
                     switch (lhs.kind) {
                         case AstKind.IDENTIFIER: {
                             let symbol: HIRReg;
-                            if (lhs.name === 'Self') {
-                                symbol = self;
-                            } else if (lhs.name === '_') {
+                            if (lhs.name === '_') {
                                 symbol = hir.emit({kind: HIRKind.SYMBOL, name: '_', parent: self, flags: 0}, decl);
                             } else {
                                 symbol = scope.get(lhs.name) ?? panic();

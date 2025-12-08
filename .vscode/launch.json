@@ -12,7 +12,7 @@
                 "<node_internals>/**"
             ],
             "type": "node",
-            "args": ["tests/2.typelang"],
+            "args": ["tests/1.typelang"],
             "sourceMaps": true
         }
     ]
