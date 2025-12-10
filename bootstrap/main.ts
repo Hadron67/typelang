@@ -28,11 +28,12 @@ async function run(entry: string, logger: Logger) {
     const stringifier = new ExpressionStringifier();
     const parseResult = parseAndIrgen(builtins, builtins.getInitialScope(), file, 0 as FileId);
 
-    const root: SymbolExpression = {kind: ExpressionKind.SYMBOL, name: 'root', flags: 0};
+    const root: SymbolExpression = {kind: ExpressionKind.SYMBOL, name: 'root', flags: 0, downValueCount: 0, upValueCount: 0};
     if (parseResult.isLeft) {
         logger.info(() => parseResult.value.dump(stringifier));
         const typeCache = new WeakMap<Expression, Expression>();
-        const csolver = new ConstraintSolver(logger, stringifier, builtins, typeCache);
+        const evaluationCache = new WeakMap<Expression, Expression>();
+        const csolver = new ConstraintSolver(logger, stringifier, builtins, typeCache, evaluationCache);
         const solver = new HIRSolver(root, parseResult.value.regs, csolver);
         solver.run();
         const diag = solver.collectDiagnostics();

@@ -352,6 +352,7 @@ export interface AstModule extends SourceRange {
     readonly kind: AstKind.MODULE;
     readonly name: AstIdentifier;
     readonly decls: Ast[];
+    readonly type?: Ast;
 }
 
 export interface AstDownValue extends SourceRange {
@@ -849,10 +850,6 @@ export function parse(source: string, file: FileId): Either<Ast[], SourceRangeMe
                     expr = parseArgLists(expr);
                     break;
                 }
-                case TokenKind.OPEN_BRACE: {
-                    expr = parseStructLiteral(expr, expr.start);
-                    break;
-                }
                 default: return expr;
             }
         }
@@ -983,6 +980,10 @@ export function parse(source: string, file: FileId): Either<Ast[], SourceRangeMe
         const start = token.start;
         expect(TokenKind.MODULE);
         const name = parseIdentifier();
+        let type: Ast | undefined = void 0;
+        if (tryExpect(TokenKind.COLON)) {
+            type = parseExpression();
+        }
         expect(TokenKind.OPEN_BRACE);
         const decls: Ast[] = [];
         while (token.kind !== TokenKind.CLOSE_BRACE) {
@@ -990,7 +991,7 @@ export function parse(source: string, file: FileId): Either<Ast[], SourceRangeMe
             parseSemicolons();
         }
         expect(TokenKind.CLOSE_BRACE);
-        return {kind: AstKind.MODULE, name, decls, file, start, length: token.start - start};
+        return {kind: AstKind.MODULE, name, type, decls, file, start, length: token.start - start};
     }
 
     function parseLet(requireInitializer: boolean, isPub: boolean): AstLet {

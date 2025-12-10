@@ -103,6 +103,8 @@ export interface HIRSymbol {
     readonly kind: HIRKind.SYMBOL;
     readonly name?: string;
     readonly parent?: HIRReg;
+    downValueCount: number;
+    upValueCount: number;
     flags: number;
 }
 
@@ -416,7 +418,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, SymbolExpressio
         for (const decl of decls) {
             const name = getDeclName(decl);
             if (name !== 'Self' && name !== null && name !== '_' && !scope.has(name)) {
-                scope.set(name, hir.emit({kind: HIRKind.SYMBOL, name, parent: self, flags: 0}, decl));
+                scope.set(name, hir.emit({kind: HIRKind.SYMBOL, name, parent: self, flags: 0, downValueCount: 0, upValueCount: 0}, decl));
             }
         }
         scopes.push(scope);
@@ -428,7 +430,7 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, SymbolExpressio
                         case AstKind.IDENTIFIER: {
                             let symbol: HIRReg;
                             if (lhs.name === '_') {
-                                symbol = hir.emit({kind: HIRKind.SYMBOL, name: '_', parent: self, flags: 0}, decl);
+                                symbol = hir.emit({kind: HIRKind.SYMBOL, name: '_', parent: self, flags: 0, downValueCount: 0, upValueCount: 0}, decl);
                             } else {
                                 symbol = scope.get(lhs.name) ?? panic();
                             }
@@ -453,7 +455,11 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, SymbolExpressio
                                     assert(entry.kind === HIRKind.SYMBOL);
                                     const rule = genRule(lhs, rhs);
                                     hir.emit({kind: HIRKind.SYMBOL_RULE, symbol: tag, rule, isUpValue}, decl);
-                                    entry.flags |= isUpValue ? SymbolFlags.ALLOW_UP_VALUE : SymbolFlags.ALLOW_DOWN_VALUE;
+                                    if (isUpValue) {
+                                        entry.upValueCount++;
+                                    } else {
+                                        entry.downValueCount++;
+                                    }
                                     break;
                                 }
                             }
@@ -469,6 +475,13 @@ export function irgen(inputAst: Ast[], initialScope: Map<string, SymbolExpressio
                     if (name === 'Self') {
                         diagnostics.push({...asSourceRange(decl), msg: 'cannot use Self as module name'});
                     } else {
+                        const m = scope.get(name) ?? panic();
+                        if (decl.type !== void 0) {
+                            const entry = hir.regs[m].value;
+                            assert(entry.kind === HIRKind.SYMBOL);
+                            entry.flags |= SymbolFlags.ALLOW_DEF_TYPE;
+                            hir.emit({kind: HIRKind.SYMBOL_TYPE, symbol: m, type: genExpression(decl.type)}, decl.type);
+                        }
                         genModuleBody(scope.get(name) ?? panic(), decl.decls);
                     }
                     break;

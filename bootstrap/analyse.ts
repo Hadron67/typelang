@@ -19,13 +19,11 @@ export type VariableId = number & { __marker: VariableId };
 export const enum SymbolFlags {
     ALLOW_DEF_TYPE = 1,
     ALLOW_ASSIGNMENT = 2,
-    ALLOW_DOWN_VALUE = 4,
-    ALLOW_UP_VALUE = 8,
     AUTO_REMOVE = 16,
     HOLD = 32,
 }
 
-export const SYMBOL_FLAG_NAMES = ['AllowDefType', 'AllowAssigment', 'AllowDownValue', 'AllowUpValue', 'AutoRemove', 'Hold'];
+export const SYMBOL_FLAG_NAMES = ['AllowDefType', 'AllowAssigment', 'AutoRemove', 'Hold'];
 
 export function dumpFlags(flags: SymbolFlags) {
     const parts: string[] = [];
@@ -56,6 +54,8 @@ export interface SymbolExpression {
     readonly name?: string;
     readonly evaluator?: (args: Expression[]) => Expression | undefined;
     readonly flags: number;
+    readonly downValueCount: number;
+    readonly upValueCount: number;
     type?: Expression;
     value?: Expression;
     subSymbols?: Map<string, SymbolExpression>;
@@ -89,6 +89,7 @@ export interface LambdaExpression {
     readonly argType: Expression;
     readonly body: Expression;
     readonly color: number;
+    readonly holdBody: boolean;
     readonly loc?: SourceRange;
 }
 
@@ -210,11 +211,11 @@ export class BuiltinSymbols {
             if (parent.subSymbols === void 0) {
                 parent.subSymbols = new Map();
             }
-            const ret: SymbolExpression = {kind: ExpressionKind.SYMBOL, name, parent, type, flags: 0};
+            const ret: SymbolExpression = {kind: ExpressionKind.SYMBOL, name, parent, type, flags: 0, downValueCount: 0, upValueCount: 0};
             parent.subSymbols.set(name, ret);
             return ret;
         };
-        this.builtin = {kind: ExpressionKind.SYMBOL, name: 'builtin', flags: 0};
+        this.builtin = {kind: ExpressionKind.SYMBOL, name: 'builtin', flags: 0, downValueCount: 0, upValueCount: 0};
         this.levelType = subSymbol(this.builtin, "Level", void 0);
         this.levelSucc = {
             kind: ExpressionKind.SYMBOL,
@@ -222,6 +223,8 @@ export class BuiltinSymbols {
             type: {kind: ExpressionKind.FN_TYPE, inputType: this.levelType, outputType: this.levelType, color: 0},
             flags: 0,
             parent: this.levelType,
+            downValueCount: 0,
+            upValueCount: 0,
             evaluator(args) {
                 const a = args[0];
                 if (a.kind === ExpressionKind.NUMBER && a.isLevel) {
@@ -246,6 +249,8 @@ export class BuiltinSymbols {
             },
             flags: 0,
             parent: this.levelType,
+            downValueCount: 0,
+            upValueCount: 0,
             evaluator(args) {
                 if (args.length < 2) return void 0;
                 const [a1, a2] = args;
@@ -254,7 +259,7 @@ export class BuiltinSymbols {
         };
         setParent(this.levelMax);
 
-        this.root = {kind: ExpressionKind.SYMBOL, name: 'root', flags: 0};
+        this.root = {kind: ExpressionKind.SYMBOL, name: 'root', flags: 0, downValueCount: 0, upValueCount: 0};
         this.type = subSymbol(this.builtin, "Type", void 0);
         {
             const i: VariableExpression = {
@@ -1090,6 +1095,7 @@ export class ConstraintSolver {
         readonly stringifier: ExpressionStringifier,
         readonly builtins: BuiltinSymbols,
         readonly typeCache: WeakMap<Expression, Expression>,
+        readonly evaluationCache: WeakMap<Expression, Expression>,
     ) {}
     add(con: Constraint) {
         this.logger.info(() => `add constraint ${dumpConstraint(con, this.stringifier)}`);
@@ -1159,6 +1165,7 @@ export class ConstraintSolver {
             };
             return {
                 kind: ExpressionKind.LAMBDA,
+                holdBody: false,
                 arg: newArg,
                 argType,
                 body: newArg !== void 0 ? (replaceScopeVariable(body, arg, newArg, this) ?? panic()) : body,
@@ -1218,7 +1225,7 @@ export class ConstraintSolver {
                 const [fn2, args2] = collectFnArgs(expr2);
                 if (fn1.kind === ExpressionKind.SYMBOL && fn2.kind === ExpressionKind.SYMBOL) {
                     if (args1.length === args2.length && fn1 === fn2) {
-                        if (0 === (fn1.flags & (SymbolFlags.ALLOW_DOWN_VALUE | SymbolFlags.ALLOW_ASSIGNMENT))) {
+                        if (fn1.downValueCount === 0 && fn1.upValueCount === 0 && 0 === (fn1.flags & SymbolFlags.ALLOW_ASSIGNMENT)) {
                             for (let i = 0; i < args1.length; i++) {
                                 this.addEqualConstraint(args1[i], args2[i]);
                             }
@@ -1328,7 +1335,7 @@ export class ConstraintSolver {
     }
     private evaluateConstraint(con: Constraint) {
         const {logger, stringifier} = this;
-        const evaluator = new Evaluator(this.builtins, this);
+        const evaluator = new Evaluator(this.builtins, this, this.evaluationCache);
         this.logger.info(() => `evaluating constraint ${dumpConstraint(con, this.stringifier)}`);
         switch (con.kind) {
             case ConstraintKind.EQUAL: {
@@ -1643,6 +1650,7 @@ export class HIRSolver {
                 const arg = args[args.length - 1 - i];
                 retValue = {
                     kind: ExpressionKind.LAMBDA,
+                    holdBody: true,
                     argType: arg.argType,
                     arg: arg.arg,
                     color: arg.color,
@@ -1775,6 +1783,8 @@ export class HIRSolver {
                     loc,
                     flags: value.flags,
                     type,
+                    downValueCount: value.downValueCount,
+                    upValueCount: value.upValueCount,
                 };
                 setParent(resolved.value);
                 return PollResult.DONE;
@@ -1857,19 +1867,26 @@ export class HIRSolver {
     }
 }
 
-function collectRules(expr: CallExpression) {
+function collectRules(expr: CallExpression): [[Expression, Expression][], boolean] {
     const [fn, args] = collectFnArgs(expr);
+    let stable = true;
     const rules: [Expression, Expression][] = [];
     for (const arg of args) {
         if (arg.kind === ExpressionKind.SYMBOL) {
             if (arg.upValues) {
                 rules.push(...arg.upValues);
             }
+            if (arg.upValueCount > (arg.upValues === void 0 ? 0 : arg.upValues.length)) {
+                stable = false;
+            }
         } else if (arg.kind === ExpressionKind.CALL) {
             const fn2 = getFn(arg);
             if (fn2.kind === ExpressionKind.SYMBOL) {
                 if (fn2.upValues) {
                     rules.push(...fn2.upValues);
+                }
+                if (fn2.upValueCount > (fn2.upValues === void 0 ? 0 : fn2.upValues.length)) {
+                    stable = false;
                 }
             }
         }
@@ -1878,8 +1895,11 @@ function collectRules(expr: CallExpression) {
         if (fn.downValues) {
             rules.push(...fn.downValues);
         }
+        if (fn.downValueCount > (fn.downValues === void 0 ? 0 : fn.downValues.length)) {
+            stable = false;
+        }
     }
-    return rules;
+    return [rules, stable];
 }
 
 type EvaluatorAction = (self: Evaluator) => void;
@@ -1887,108 +1907,159 @@ export class Evaluator {
     ownValue = true;
     downValue = true;
     expandLambda = true;
-    private readonly stack: Expression[] = [];
+    private readonly valueStack: Expression[] = [];
+    private readonly stableStack: boolean[] = [];
     private readonly todo: EvaluatorAction[] = [];
-    constructor(readonly builtins: BuiltinSymbols, readonly csolver: ConstraintSolver) {}
+    private stable = true;
+    constructor(readonly builtins: BuiltinSymbols, readonly csolver: ConstraintSolver, readonly cache: WeakMap<Expression, Expression>) {}
     private doActions(...actions: EvaluatorAction[]) {
         pushReversed(this.todo, actions);
     }
-    private _evaluate(expr: Expression): EvaluatorAction {
+    private popStableStack(count: number) {
+        let ret = true;
+        for (let i = 0; i < count; i++) {
+            const v = this.stableStack.pop() ?? panic();
+            ret = ret && v;
+        }
+        return ret;
+    }
+    private peekValue() {
+        assert(this.valueStack.length > 0);
+        return this.valueStack[this.valueStack.length - 1];
+    }
+    private peekStable() {
+        assert(this.stableStack.length > 0);
+        return this.stableStack[this.stableStack.length - 1];
+    }
+    private putCache(expr: Expression): EvaluatorAction {
         return self => {
+            if (self.peekStable()) {
+                self.cache.set(expr, self.peekValue());
+            }
+        };
+    }
+    private _evaluate(expr: Expression, stable: boolean): EvaluatorAction {
+        return self => {
+            const cached = self.cache.get(expr);
+            if (cached !== void 0) {
+                assert(stable);
+                self.stableStack.push(true);
+                self.valueStack.push(cached);
+                self.csolver.logger.info(() => `evaluation cache hit ${self.csolver.stringifier.stringify(expr)} === ${self.csolver.stringifier.stringify(cached)}`);
+                return;
+            }
             switch (expr.kind) {
-                case ExpressionKind.VARIABLE: self.stack.push(expr); break;
+                case ExpressionKind.VARIABLE:
+                    self.valueStack.push(expr);
+                    self.stableStack.push(stable);
+                    break;
                 case ExpressionKind.SYMBOL: {
                     if (self.ownValue && expr.value !== void 0) {
-                        self.doActions(self._evaluate(expr.value));
+                        self.doActions(self._evaluate(expr.value, stable));
                     } else {
-                        self.stack.push(expr);
+                        self.valueStack.push(expr);
+                        self.stableStack.push(stable && 0 === (expr.flags & SymbolFlags.ALLOW_ASSIGNMENT));
                     }
                     break;
                 }
                 case ExpressionKind.CALL: {
-                    self.doActions(self._evaluate(expr.fn), self._evaluate(expr.arg), self => {
-                        const arg = self.stack.pop()!;
-                        const fn = self.stack.pop()!;
+                    self.doActions(self._evaluate(expr.fn, stable), self._evaluate(expr.arg, stable), self => {
+                        const arg = self.valueStack.pop() ?? panic();
+                        const fn = self.valueStack.pop() ?? panic();
+                        const stable = self.popStableStack(2);
                         if (fn.kind === ExpressionKind.LAMBDA) {
                             if (fn.arg !== void 0) {
-                                self.doActions(self._evaluate(replaceScopeVariable(fn.body, fn.arg, arg, self.csolver) ?? panic()));
+                                self.doActions(self._evaluate(replaceScopeVariable(fn.body, fn.arg, arg, self.csolver) ?? panic(), stable));
                             } else {
-                                self.stack.push(fn.body);
+                                self.doActions(self._evaluate(fn.body, stable));
                             }
                         } else {
                             if (fn !== expr.fn || arg !== expr.arg) {
-                                self.doActions(self._postCall({...expr, fn, arg}));
+                                self.doActions(self._postCall({...expr, fn, arg}, stable));
                             } else {
-                                self.doActions(self._postCall(expr));
+                                self.doActions(self._postCall(expr, stable));
                             }
                         }
-                    });
+                    }, self.putCache(expr));
                     break;
                 }
                 case ExpressionKind.FN_TYPE: {
-                    self.doActions(self._evaluate(expr.inputType), self._evaluate(expr.outputType), self => {
-                        const outputType = self.stack.pop()!;
-                        const inputType = self.stack.pop()!;
+                    self.doActions(self._evaluate(expr.inputType, stable), self._evaluate(expr.outputType, stable), self => {
+                        const outputType = self.valueStack.pop()!;
+                        const inputType = self.valueStack.pop()!;
+                        self.stableStack.push(self.popStableStack(2));
                         if (inputType !== expr.inputType || outputType !== expr.outputType) {
-                            self.stack.push({...expr, inputType, outputType});
+                            self.valueStack.push({...expr, inputType, outputType});
                         } else {
-                            self.stack.push(expr);
+                            self.valueStack.push(expr);
                         }
-                    });
+                    }, self.putCache(expr));
                     break;
                 }
                 case ExpressionKind.LAMBDA: {
-                    self.doActions(self._evaluate(expr.body), self => {
-                        const body = self.stack.pop()!;
-                        // eta reduction
-                        if (expr.arg !== void 0 && body.kind === ExpressionKind.CALL && canUseEtaReduction(body) && body.arg === expr.arg) {
-                            self.stack.push(body.fn);
-                            return;
-                        }
-                        if (body !== expr.body) {
-                            self.stack.push({...expr, body});
-                        } else {
-                            self.stack.push(expr);
-                        }
-                    });
+                    if (!expr.holdBody) {
+                        self.doActions(self._evaluate(expr.body, stable), self => {
+                            const body = self.valueStack.pop()!;
+                            // eta reduction
+                            if (expr.arg !== void 0 && body.kind === ExpressionKind.CALL && canUseEtaReduction(body) && body.arg === expr.arg) {
+                                self.valueStack.push(body.fn);
+                                return;
+                            }
+                            if (body !== expr.body) {
+                                self.valueStack.push({...expr, body});
+                            } else {
+                                self.valueStack.push(expr);
+                            }
+                        }, self.putCache(expr));
+                    } else {
+                        self.stableStack.push(stable);
+                        self.valueStack.push(expr);
+                    }
                     break;
                 }
                 case ExpressionKind.UNKNOWN: {
                     if (expr.value !== void 0) {
-                        self.doActions(self._evaluate(expr.value));
+                        self.doActions(self._evaluate(expr.value, stable));
                     } else {
-                        self.stack.push(expr);
+                        self.valueStack.push(expr);
+                        self.stableStack.push(false);
                     }
                     break;
                 }
                 case ExpressionKind.NUMBER:
                 case ExpressionKind.STRING:
-                    self.stack.push(expr);
+                    self.valueStack.push(expr);
+                    self.stableStack.push(stable);
                     break;
                 default: panic();
             }
         };
     }
-    private _postCall(expr: CallExpression): EvaluatorAction {
+    private _postCall(expr: CallExpression, stable: boolean): EvaluatorAction {
         return self => {
             const [fn, args] = collectFnArgs(expr);
             if (fn.kind === ExpressionKind.SYMBOL) {
                 if (fn.evaluator !== void 0) {
                     const value = fn.evaluator(args);
                     if (value !== void 0) {
-                        self.stack.push(value);
+                        self.doActions(self._evaluate(value, stable));
                         return;
                     }
                 }
-                for (const [lhs, rhs] of collectRules(expr)) {
+                const [rules, stable2] = collectRules(expr);
+                if (!stable2) {
+                    stable = false;
+                }
+                for (const [lhs, rhs] of rules) {
                     const reps = matchPattern(lhs, expr);
                     if (reps !== null) {
-                        self.doActions(self._evaluate(replaceScopeVariables(rhs, reps, self.csolver)));
+                        self.doActions(self._evaluate(replaceScopeVariables(rhs, reps, self.csolver), stable));
                         return;
                     }
                 }
             }
-            self.stack.push(expr);
+            self.valueStack.push(expr);
+            self.stableStack.push(stable);
         };
     }
     wait() {
@@ -1996,11 +2067,16 @@ export class Evaluator {
             this.todo.pop()!(this);
         }
     }
+    isStable() {
+        return this.stable;
+    }
     evaluate(expr: Expression) {
-        this.stack.length = 0;
-        this.doActions(this._evaluate(expr));
+        this.valueStack.length = 0;
+        this.doActions(this._evaluate(expr, true));
         this.wait();
-        assert(this.stack.length === 1);
-        return this.stack.pop()!;
+        assert(this.valueStack.length === 1);
+        assert(this.stableStack.length === 1);
+        this.stable = this.stableStack.pop()!;
+        return this.valueStack.pop()!;
     }
 }
