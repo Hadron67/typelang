@@ -43,11 +43,11 @@ module Eq: [n, T: Type(n)] -> T -> T -> Type(n) {
     lemma-2-3-11(refl(?), ?) = refl(_);
 }
 
-module Sum: [n](A: Type(n)) -> (A -> Type(n)) -> Type(n) {
-    pair: [n, A: Type(n), B: A -> Type(n)](a: A) -> B(a) -> Self(A, B);
-    first: [n, A: Type(n), B: A -> Type(n)] -> Self(A, B) -> A;
+module Sigma: [n, n'](A: Type(n)) -> (A -> Type(n')) -> Type(builtin.Level.max(n, n')) {
+    pair: [n, n', A: Type(n), B: A -> Type(n')](a: A) -> B(a) -> Self(A, B);
+    first: [n, n', A: Type(n), B: A -> Type(n')] -> Self(A, B) -> A;
     first(pair(?a, ?b)) = a;
-    second: [n, A: Type(n), B: A -> Type(n)] -> (self: Self(A, B)) -> B(first(self));
+    second: [n, n', A: Type(n), B: A -> Type(n')] -> (self: Self(A, B)) -> B(first(self));
     second(pair(?a, ?b)) = b;
 }
 
@@ -102,6 +102,13 @@ module Nat: Type(0) {
         assoc: (x: Nat, y: Nat, z: Nat) -> Eq(mul(mul(x, y), z), mul(x, mul(y, z)));
         assoc(?x, ?y, zero) = Eq.refl(_);
         assoc(?x, ?y, succ(?z)) = Eq.concat(Eq.ap(\z plus(z, mul(x, y)), assoc(x, y, z)), Eq.inv(distro(x, mul(y, z), y)));
+    }
+
+    module leq: Self -> Self -> Type(0) {
+        Self(?n, ?m) = Sigma(Nat, \k Eq(plus(n, k), m));
+
+        trans: [a: Nat, b: Nat, c: Nat] -> Self(a, b) -> Self(b, c) -> Self(a, c);
+        trans[?a, ?b, ?c](Sigma.pair(?k1, ?p1), Sigma.pair(?k2, ?p2)) = Sigma.pair(plus(k1, k2), Eq.concat(Eq.inv(plus.assoc(a, k1, k2)), Eq.concat(Eq.ap(\y plus(y, k2), p1), p2)));
     }
 }
 

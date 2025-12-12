@@ -390,7 +390,7 @@ export class TypeSolver {
                     } else {
                         const type: UnknownExpression = {kind: ExpressionKind.UNKNOWN, isPattern: false, excludedVariables: new Set()};
                         expr.excludedVariables.forEach(v => type.excludedVariables.add(v));
-                        self.csolver.add({kind: ConstraintKind.TYPEOF, target: type, expr});
+                        self.csolver.add({kind: ConstraintKind.META_EQUAL, target: type, expr: {kind: MetaExpressionKind.TYPEOF, expr}});
                         self.stack.push(type);
                     }
                     break;
@@ -404,7 +404,7 @@ export class TypeSolver {
                         const outputTypeType = self.stack.pop()!;
                         const inputTypeType = self.stack.pop()!;
                         const ret: UnknownExpression = {kind: ExpressionKind.UNKNOWN, isPattern: false, excludedVariables: new Set()};
-                        self.csolver.add({kind: ConstraintKind.FN_TYPE_TYPE, target: ret, type1: inputTypeType, type2: outputTypeType});
+                        self.csolver.add({kind: ConstraintKind.META_EQUAL, target: ret, expr: {kind: MetaExpressionKind.FN_TYPE_TYPE, type1: inputTypeType, type2: outputTypeType}});
                         self.cache.set(expr, ret);
                         self.stack.push(ret);
                     });
@@ -508,6 +508,19 @@ export class ExpressionStringifier {
     }
     stringifyVariable(expr: VariableExpression) {
         return (expr.name ?? '') + '$' + this.varialbeNumbers.get(expr);
+    }
+    stringifyMeta(expr: MetaExpression) {
+        switch (expr.kind) {
+            case MetaExpressionKind.EXPR: return this.stringify(expr.expr);
+            case MetaExpressionKind.FN_OUTPUT_TYPE: return `#fn-type-output-type(${this.stringify(expr.fnType)}, ${this.stringify(expr.arg)})`;
+            case MetaExpressionKind.FN_TYPE_TYPE: return `#fn-type-type(${this.stringify(expr.type1)}, ${this.stringify(expr.type2)})`;
+            case MetaExpressionKind.TYPEOF: return `#typeof(${this.stringify(expr.expr)})`;
+            case MetaExpressionKind.REPLACE: {
+                const reps: string[] = [];
+                expr.replaces.forEach((v, k) => reps.push(`${this.stringify(k)} -> ${this.stringify(v)}`));
+                return `${this.stringify(expr.expr)} /. ${reps.length === 1 ? reps[0] : `{${reps.join(', ')}}`}`;
+            }
+        }
     }
     stringify(expr: Expression) {
         const stack: string[] = [];
@@ -919,36 +932,44 @@ export function canUseEtaReduction(expr: CallExpression) {
 }
 
 export function sameQ(expr1: Expression, expr2: Expression) {
+    return sameQWithStable(expr1, expr2)[0];
+}
+
+export function sameQWithStable(expr1: Expression, expr2: Expression): [boolean, boolean] {
+    let stable = true;
     const todo = [expr1, expr2];
     while (todo.length > 0) {
         const expr2 = unwrapUnknown(todo.pop()!);
         const expr1 = unwrapUnknown(todo.pop()!);
+        if (expr1 !== expr2 && ((expr1.kind === ExpressionKind.UNKNOWN) !== (expr2.kind === ExpressionKind.UNKNOWN))) {
+            stable = false;
+        }
         switch (expr1.kind) {
             case ExpressionKind.SYMBOL:
             case ExpressionKind.VARIABLE:
                 if (expr1 !== expr2) {
-                    return false;
+                    return [false, stable];
                 }
                 break;
             case ExpressionKind.NUMBER:
                 if (expr2.kind !== ExpressionKind.NUMBER || expr2.isLevel !== expr1.isLevel || expr2.value !== expr1.value) {
-                    return false;
+                    return [false, stable];
                 }
                 break;
             case ExpressionKind.STRING:
                 if (expr2.kind !== ExpressionKind.STRING || expr2.value !== expr1.value) {
-                    return false;
+                    return [false, stable];
                 }
                 break;
             case ExpressionKind.CALL:
                 if (expr2.kind !== ExpressionKind.CALL) {
-                    return false;
+                    return [false, stable];
                 }
                 todo.push(expr1.arg, expr2.arg, expr1.fn, expr2.fn);
                 break;
             case ExpressionKind.FN_TYPE: {
                 if (expr2.kind !== ExpressionKind.FN_TYPE) {
-                    return false;
+                    return [false, stable];
                 }
                 let output2 = expr2.outputType;
                 if (expr1.arg !== void 0 && expr2.arg !== void 0 && expr1.arg !== expr2.arg) {
@@ -959,7 +980,7 @@ export function sameQ(expr1: Expression, expr2: Expression) {
             }
             case ExpressionKind.LAMBDA: {
                 if (expr2.kind !== ExpressionKind.LAMBDA) {
-                    return false;
+                    return [false, stable];
                 }
                 let body2 = expr2.body;
                 if (expr1.arg !== void 0 && expr2.arg !== void 0 && expr1.arg !== expr2.arg) {
@@ -970,39 +991,50 @@ export function sameQ(expr1: Expression, expr2: Expression) {
             }
             case ExpressionKind.UNKNOWN: {
                 if (expr1 !== expr2) {
-                    return false;
+                    return [false, stable];
                 }
                 break;
             }
             default: panic();
         }
     }
-    return true;
+    return [true, stable];
 }
 
-export function matchPattern(pattern: Expression, expr: Expression) {
+export function matchPattern(pattern: Expression, expr: Expression): [Map<VariableExpression, Expression> | undefined, boolean] {
+    let stable = true;
     const reps = new Map<VariableExpression, Expression>();
     const todo = [pattern, expr];
     while (todo.length > 0) {
-        const expr = todo.pop()!;
-        const pattern = todo.pop()!;
+        const expr = unwrapUnknown(todo.pop()!);
+        const pattern = unwrapUnknown(todo.pop()!);
+        if (expr.kind === ExpressionKind.UNKNOWN) {
+            stable = false;
+        }
         switch (pattern.kind) {
             case ExpressionKind.SYMBOL:
-                if (expr !== pattern) return null;
-                break;
             case ExpressionKind.STRING:
             case ExpressionKind.NUMBER:
             case ExpressionKind.LAMBDA:
-            case ExpressionKind.FN_TYPE:
-                if (!sameQ(pattern, expr)) {
-                    return null;
+            case ExpressionKind.FN_TYPE: {
+                const [same, stable2] = sameQWithStable(pattern, expr);
+                if (!stable2) {
+                    stable = false;
+                }
+                if (!same) {
+                    return [void 0, stable];
                 }
                 break;
+            }
             case ExpressionKind.VARIABLE: {
                 const old = reps.get(pattern);
                 if (old !== void 0) {
-                    if (!sameQ(old, expr)) {
-                        return null;
+                    const [same, stable2] = sameQWithStable(old, expr);
+                    if (!stable2) {
+                        stable = false;
+                    }
+                    if (!same) {
+                        return [void 0, stable];
                     }
                 } else {
                     reps.set(pattern, expr);
@@ -1011,15 +1043,15 @@ export function matchPattern(pattern: Expression, expr: Expression) {
             }
             case ExpressionKind.CALL:
                 if (expr.kind !== ExpressionKind.CALL || countArgs(pattern) !== countArgs(expr)) {
-                    return null;
+                    return [void 0, stable];
                 }
                 todo.push(pattern.arg, expr.arg, pattern.fn, expr.fn);
                 break;
-            case ExpressionKind.UNKNOWN: return null;
+            case ExpressionKind.UNKNOWN: return [void 0, stable];
             default: panic();
         }
     }
-    return reps;
+    return [reps, stable];
 }
 
 export function countArgs(expr: Expression) {
@@ -1031,6 +1063,14 @@ export function countArgs(expr: Expression) {
     return ret;
 }
 
+export const enum MetaExpressionKind {
+    EXPR,
+    FN_TYPE_TYPE,
+    FN_OUTPUT_TYPE,
+    TYPEOF,
+    REPLACE,
+}
+
 interface HIRResolvedData {
     errored: boolean;
     type?: Expression;
@@ -1039,16 +1079,12 @@ interface HIRResolvedData {
 
 export const enum ConstraintKind {
     EQUAL,
-    EQUAL_WITH_REPLACE,
-    FN_TYPE_TYPE,
-    TYPEOF,
+    META_EQUAL,
 }
 
 export type Constraint =
     | EqualConstraint
-    | EqualWithReplaceConstraint
-    | FnTypeTypeConstraint
-    | TypeofConstraint
+    | MetaEqualConstraint
 ;
 
 export interface EqualConstraint {
@@ -1057,24 +1093,46 @@ export interface EqualConstraint {
     readonly expr2: Expression;
 }
 
-export interface FnTypeTypeConstraint {
-    readonly kind: ConstraintKind.FN_TYPE_TYPE;
+export interface MetaEqualConstraint {
+    readonly kind: ConstraintKind.META_EQUAL,
     readonly target: UnknownExpression;
+    readonly expr: MetaExpression;
+}
+
+export type MetaExpression =
+    | ExpressionMetaExpression
+    | FnTypeTypeMetaExpression
+    | FnOutputTypeMetaExpression
+    | TypeofMetaExpression
+    | ReplaceMetaExpression
+;
+
+export interface ExpressionMetaExpression {
+    readonly kind: MetaExpressionKind.EXPR;
+    readonly expr: Expression;
+}
+
+export interface FnTypeTypeMetaExpression {
+    readonly kind: MetaExpressionKind.FN_TYPE_TYPE;
     readonly type1: Expression;
     readonly type2: Expression;
 }
 
-export interface EqualWithReplaceConstraint {
-    readonly kind: ConstraintKind.EQUAL_WITH_REPLACE;
-    readonly target: UnknownExpression;
-    readonly expr: UnknownExpression;
-    readonly replaces: Map<VariableExpression, Expression>;
+export interface FnOutputTypeMetaExpression {
+    readonly kind: MetaExpressionKind.FN_OUTPUT_TYPE;
+    readonly fnType: Expression;
+    readonly arg: Expression;
 }
 
-export interface TypeofConstraint {
-    readonly kind: ConstraintKind.TYPEOF;
-    readonly target: UnknownExpression;
+export interface TypeofMetaExpression {
+    readonly kind: MetaExpressionKind.TYPEOF;
     readonly expr: UnknownExpression;
+}
+
+export interface ReplaceMetaExpression {
+    readonly kind: MetaExpressionKind.REPLACE;
+    readonly expr: UnknownExpression;
+    readonly replaces: Map<VariableExpression, Expression>;
 }
 
 function markRenamedVariable(from: VariableExpression, to: VariableExpression, expr: Expression) {
@@ -1116,19 +1174,32 @@ export class ConstraintSolver {
                 this.scanUnknowns(con.expr1);
                 this.scanUnknowns(con.expr2);
                 break;
-            case ConstraintKind.EQUAL_WITH_REPLACE:
-                this.constraintUnknowns.add(con.target);
-                con.replaces.forEach(v => this.scanUnknowns(v));
+            case ConstraintKind.META_EQUAL: {
+                const {expr, target} = con;
+                this.constraintUnknowns.add(target);
+                switch (expr.kind) {
+                    case MetaExpressionKind.EXPR:
+                        this.scanUnknowns(expr.expr);
+                        break;
+                    case MetaExpressionKind.FN_OUTPUT_TYPE:
+                        this.scanUnknowns(expr.fnType);
+                        this.scanUnknowns(expr.arg);
+                        break;
+                    case MetaExpressionKind.FN_TYPE_TYPE:
+                        this.scanUnknowns(expr.type1);
+                        this.scanUnknowns(expr.type2);
+                        break;
+                    case MetaExpressionKind.REPLACE:
+                        this.scanUnknowns(expr.expr);
+                        expr.replaces.forEach(v => this.scanUnknowns(v));
+                        break;
+                    case MetaExpressionKind.TYPEOF:
+                        this.scanUnknowns(expr.expr);
+                        break;
+                    default: panic();
+                }
                 break;
-            case ConstraintKind.FN_TYPE_TYPE:
-                this.constraintUnknowns.add(con.target);
-                this.scanUnknowns(con.type1);
-                this.scanUnknowns(con.type2);
-                break;
-            case ConstraintKind.TYPEOF:
-                this.constraintUnknowns.add(con.target);
-                this.scanUnknowns(con.expr);
-                break;
+            }
             default: panic();
         }
     }
@@ -1152,7 +1223,7 @@ export class ConstraintSolver {
     makeReplaceUnknown(expr: UnknownExpression, type: Expression | undefined, replaces: Map<VariableExpression, Expression>) {
         const ret: UnknownExpression = {kind: ExpressionKind.UNKNOWN, type, excludedVariables: new Set(), isPattern: false};
         expr.excludedVariables.forEach(v => ret.excludedVariables.add(v));
-        this.add({kind: ConstraintKind.EQUAL_WITH_REPLACE, target: ret, expr, replaces});
+        this.add({kind: ConstraintKind.META_EQUAL, target: ret, expr: {kind: MetaExpressionKind.REPLACE, expr, replaces}});
         return ret;
     }
     makeLambda(body: Expression, arg: VariableExpression, argType: Expression, color: number): Expression {
@@ -1362,41 +1433,60 @@ export class ConstraintSolver {
                 }
                 return changed;
             }
-            case ConstraintKind.TYPEOF: {
-                if (con.expr.value !== void 0 && this.setUnknown(con.target, this.getType(con.expr))) {
+            case ConstraintKind.META_EQUAL: {
+                const expr = this.evaluateMetaExpression(con.expr);
+                if (expr.kind === MetaExpressionKind.EXPR && this.setUnknown(con.target, expr.expr)) {
                     return true;
                 }
-                this.add(con);
-                return false;
+                this.add(expr !== con.expr ? {...con, expr} : con);
+                break;
             }
-            case ConstraintKind.FN_TYPE_TYPE: {
-                const type1 = evaluator.evaluate(con.type1);
-                const type2 = evaluator.evaluate(con.type2);
-                const changed = type1 !== con.type1 || type2 !== con.type2;
+            default: panic();
+        }
+    }
+    evaluateMetaExpression(expr: MetaExpression): MetaExpression {
+        const {logger, stringifier} = this;
+        const evaluator = new Evaluator(this.builtins, this, this.evaluationCache);
+        const e = (expr: Expression): MetaExpression => ({kind: MetaExpressionKind.EXPR, expr});
+        switch (expr.kind) {
+            case MetaExpressionKind.TYPEOF: {
+                if (expr.expr.value !== void 0) {
+                    return e(this.getType(expr.expr.value));
+                }
+                return expr;
+            }
+            case MetaExpressionKind.FN_TYPE_TYPE: {
+                const type1 = evaluator.evaluate(expr.type1);
+                const type2 = evaluator.evaluate(expr.type2);
+                const changed = type1 !== expr.type1 || type2 !== expr.type2;
                 const type = this.evaluateFnTypeType(type1, type2);
                 if (type !== void 0) {
-                    if (!this.setUnknown(con.target, type)) {
-                        this.erroredConstraints.push(con);
-                    }
-                    return true;
+                    return e(type);
                 }
-                if (changed) {
-                    con = {...con, type1, type2};
-                }
-                this.add(con);
-                return changed;
+                return changed ? {...expr, type1, type2} : expr;
             }
-            case ConstraintKind.EQUAL_WITH_REPLACE: {
-                if (con.expr.value !== void 0) {
-                    const rep = replaceScopeVariables(con.expr.value, con.replaces, this);
-                    if (!this.setUnknown(con.target, rep)) {
-                        this.erroredConstraints.push(con);
-                    }
-                    return true;
+            case MetaExpressionKind.REPLACE: {
+                if (expr.expr.value !== void 0) {
+                    return e(replaceScopeVariables(expr.expr.value, expr.replaces, this));
                 }
-                this.add(con);
-                return false;
+                return expr;
             }
+            case MetaExpressionKind.FN_OUTPUT_TYPE: {
+                let {fnType} = expr;
+                fnType = unwrapUnknown(fnType);
+                if (fnType.kind !== ExpressionKind.FN_TYPE) {
+                    fnType = evaluator.evaluate(fnType);
+                }
+                if (fnType.kind === ExpressionKind.FN_TYPE) {
+                    let output = fnType.outputType;
+                    if (fnType.arg !== void 0) {
+                        output = replaceScopeVariable(output, fnType.arg, expr.arg, this);
+                    }
+                    return e(output);
+                }
+                return fnType !== expr.fnType ? {...expr, fnType} : expr;
+            }
+            case MetaExpressionKind.EXPR: return expr;
             default: panic();
         }
     }
@@ -1442,13 +1532,7 @@ export class ConstraintSolver {
 export function dumpConstraint(con: Constraint, reg: ExpressionStringifier) {
     switch (con.kind) {
         case ConstraintKind.EQUAL: return `${reg.stringify(con.expr1)} === ${reg.stringify(con.expr2)}`;
-        case ConstraintKind.EQUAL_WITH_REPLACE: {
-            const reps: string[] = [];
-            con.replaces.forEach((v, k) => reps.push(`${reg.stringify(k)} -> ${reg.stringify(v)}`));
-            return `${reg.stringify(con.target)} === ${reg.stringify(con.expr)} /. ${reps.length === 1 ? reps[0] : `{${reps.join(', ')}}`}`;
-        }
-        case ConstraintKind.FN_TYPE_TYPE: return `${reg.stringify(con.target)} === #fn-type-type(${reg.stringify(con.type1)}, ${reg.stringify(con.type2)})`;
-        case ConstraintKind.TYPEOF: return `${reg.stringify(con.target)} === #typeof(${reg.stringify(con.expr)})`;
+        case ConstraintKind.META_EQUAL: return `${reg.stringify(con.target)} === ${reg.stringifyMeta(con.expr)}`;
         default: panic();
     }
 }
@@ -1568,7 +1652,7 @@ export class HIRSolver {
                     return PollResult.DONE;
                 }
             }
-            panic("TODO");
+            return PollResult.UNCHANGED;
         };
     }
     private pollLambdaAction(value: HIRLambda, loc: SourceRange | undefined, resolved: HIRResolvedData): HIRPollAction {
@@ -1933,8 +2017,10 @@ export class Evaluator {
     }
     private putCache(expr: Expression): EvaluatorAction {
         return self => {
-            if (self.peekStable()) {
-                self.cache.set(expr, self.peekValue());
+            if (self.peekStable() && !self.cache.has(expr)) {
+                const value = self.peekValue();
+                self.csolver.logger.info(() => `add evaluation cache ${self.csolver.stringifier.stringify(expr)} === ${self.csolver.stringifier.stringify(value)}`);
+                self.cache.set(expr, value);
             }
         };
     }
@@ -1942,8 +2028,7 @@ export class Evaluator {
         return self => {
             const cached = self.cache.get(expr);
             if (cached !== void 0) {
-                assert(stable);
-                self.stableStack.push(true);
+                self.stableStack.push(stable);
                 self.valueStack.push(cached);
                 self.csolver.logger.info(() => `evaluation cache hit ${self.csolver.stringifier.stringify(expr)} === ${self.csolver.stringifier.stringify(cached)}`);
                 return;
@@ -2022,7 +2107,7 @@ export class Evaluator {
                         self.doActions(self._evaluate(expr.value, stable));
                     } else {
                         self.valueStack.push(expr);
-                        self.stableStack.push(false);
+                        self.stableStack.push(stable);
                     }
                     break;
                 }
@@ -2051,12 +2136,18 @@ export class Evaluator {
                     stable = false;
                 }
                 for (const [lhs, rhs] of rules) {
-                    const reps = matchPattern(lhs, expr);
-                    if (reps !== null) {
+                    const [reps, stable3] = matchPattern(lhs, expr);
+                    if (!stable3) {
+                        stable = false;
+                    }
+                    if (reps !== void 0) {
                         self.doActions(self._evaluate(replaceScopeVariables(rhs, reps, self.csolver), stable));
                         return;
                     }
                 }
+            }
+            if (fn.kind === ExpressionKind.UNKNOWN) {
+                stable = false;
             }
             self.valueStack.push(expr);
             self.stableStack.push(stable);
