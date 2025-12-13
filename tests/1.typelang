@@ -184,3 +184,11 @@ module Empty: Type(0) {}
 
 not: [n] -> Type(n) -> Type(n);
 not(?a) = a -> Empty;
+
+module logic {
+    l1: [n, A: Type(n)] -> A -> not(not(A));
+    l1(?a, ?f) = f(a);
+
+    l2: [n, n', A: Type(n), B: Type(n')] -> (A -> B) -> (not(B) -> not(A));
+    l2(?f, ?nb, ?a) = nb(f(a));
+}

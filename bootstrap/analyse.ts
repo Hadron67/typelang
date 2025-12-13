@@ -1,5 +1,5 @@
 import { generateHIRDependencies, HIRCall, HIRFnType, HIRHost, HIRKind, HIRLambda, HIRMemberAccess, HIRReg, HIRRegData, HIRSymbol, HIRSymbolRule } from "./irgen";
-import { asSourceRange, SourceRange } from "./parser";
+import { asSourceRange, FileId, renderSourceMessage, renderSourceMessageOpt, SourceRange, SourceRangeMessage } from "./parser";
 import { assert, constArray, Either, Logger, makeArray, Mutable, panic, popReversed, PtrNumbering, pushReversed, Timer } from "./util";
 
 export const enum ExpressionKind {
@@ -141,9 +141,10 @@ export interface SymbolData {
 export const enum TypeCheckDiagnosticKind {
     UNRESOLVED_CONSTRAINT,
     UNINFERRED,
+    UNRESOLVED_HIR,
 }
 
-export type TypeCheckDiagnostic = TypeCheckDiagnosticUnequal | TypeCheckDiagnosticUninferred;
+export type TypeCheckDiagnostic = TypeCheckDiagnosticUnequal | TypeCheckDiagnosticUninferred | TypeCheckDiagnosticUnresolvedHIR;
 
 export interface TypeCheckDiagnosticUnequal {
     readonly kind: TypeCheckDiagnosticKind.UNRESOLVED_CONSTRAINT;
@@ -155,10 +156,16 @@ export interface TypeCheckDiagnosticUninferred {
     readonly expr: UnknownExpression;
 }
 
-export function renderTypeCheckDiagnostic(d: TypeCheckDiagnostic, reg: ExpressionStringifier) {
+export interface TypeCheckDiagnosticUnresolvedHIR {
+    readonly kind: TypeCheckDiagnosticKind.UNRESOLVED_HIR;
+    readonly loc?: SourceRange;
+}
+
+export function renderTypeCheckDiagnostic(d: TypeCheckDiagnostic, reg: ExpressionStringifier, fileProvider: (f: FileId) => [string, string[]]): string[] {
     switch (d.kind) {
         case TypeCheckDiagnosticKind.UNRESOLVED_CONSTRAINT: return [`unresolved constraint ${dumpConstraint(d.con, reg)}`];
         case TypeCheckDiagnosticKind.UNINFERRED: return [`uninferred symbol ${reg.stringify(d.expr)}`];
+        case TypeCheckDiagnosticKind.UNRESOLVED_HIR: return renderSourceMessageOpt({msg: 'uninferred expression', loc: d.loc}, fileProvider);
     }
 }
 
@@ -403,8 +410,7 @@ export class TypeSolver {
                     self.doActions(self._getType(expr.inputType), self._getType(expr.outputType), self => {
                         const outputTypeType = self.stack.pop()!;
                         const inputTypeType = self.stack.pop()!;
-                        const ret: UnknownExpression = {kind: ExpressionKind.UNKNOWN, isPattern: false, excludedVariables: new Set()};
-                        self.csolver.add({kind: ConstraintKind.META_EQUAL, target: ret, expr: {kind: MetaExpressionKind.FN_TYPE_TYPE, type1: inputTypeType, type2: outputTypeType}});
+                        const ret = self.csolver.makeMetaExpression({kind: MetaExpressionKind.FN_TYPE_TYPE, type1: inputTypeType, type2: outputTypeType});
                         self.cache.set(expr, ret);
                         self.stack.push(ret);
                     });
@@ -413,17 +419,9 @@ export class TypeSolver {
                 case ExpressionKind.CALL: {
                     self.doActions(self._getType(expr.fn), self => {
                         const fnType = unwrapUnknown(self.stack.pop()!);
-                        if (fnType.kind === ExpressionKind.FN_TYPE) {
-                            let type = fnType.outputType;
-                            if (fnType.arg !== void 0) {
-                                type = replaceScopeVariable(type, fnType.arg, expr.arg, self.csolver) ?? panic();
-                            }
-                            self.cache.set(expr, type);
-                            self.stack.push(type);
-                        } else {
-                            self.cache.set(expr, self.builtins.errorType);
-                            self.stack.push(self.builtins.errorType);
-                        }
+                        const ret = self.csolver.makeMetaExpression({kind: MetaExpressionKind.FN_OUTPUT_TYPE, fnType, arg: expr.arg});
+                        self.cache.set(expr, ret);
+                        self.stack.push(ret);
                     });
                     break;
                 }
@@ -1226,6 +1224,15 @@ export class ConstraintSolver {
         this.add({kind: ConstraintKind.META_EQUAL, target: ret, expr: {kind: MetaExpressionKind.REPLACE, expr, replaces}});
         return ret;
     }
+    makeMetaExpression(expr: MetaExpression): Expression {
+        expr = this.evaluateMetaExpression(expr);
+        if (expr.kind === MetaExpressionKind.EXPR) {
+            return expr.expr;
+        }
+        const ret: UnknownExpression = {kind: ExpressionKind.UNKNOWN, excludedVariables: new Set(), isPattern: false};
+        this.add({kind: ConstraintKind.META_EQUAL, target: ret, expr});
+        return ret;
+    }
     makeLambda(body: Expression, arg: VariableExpression, argType: Expression, color: number): Expression {
         if (body.kind === ExpressionKind.CALL && body.color === color && body.arg.kind === ExpressionKind.VARIABLE && body.arg === arg && variableFreeQ(body.fn, arg)) {
             return body.fn;
@@ -1577,6 +1584,7 @@ export class HIRSolver {
     }
     private pollCallAction(value: HIRCall, loc: SourceRange | undefined, resolved: HIRResolvedData): HIRPollAction {
         let tmpInsertedFn: Expression | undefined = void 0;
+        const evaluator = new Evaluator(this.csolver.builtins, this.csolver, this.csolver.evaluationCache);
         return self => {
             let ret = PollResult.UNCHANGED;
             if (tmpInsertedFn === void 0) {
@@ -1584,7 +1592,7 @@ export class HIRSolver {
                 if (fn === void 0) {
                     return ret;
                 }
-                let fnType = unwrapUnknown(self.csolver.getType(fn));
+                let fnType = evaluator.evaluate(self.csolver.getType(fn));
                 if (!checkFnTypeColor(fnType, value.color)) {
                     return ret;
                 }
@@ -1597,7 +1605,7 @@ export class HIRSolver {
                 tmpInsertedFn = fn;
                 ret = PollResult.CHANGED;
             }
-            const fnType = unwrapUnknown(self.csolver.getType(tmpInsertedFn));
+            const fnType = evaluator.evaluate(self.csolver.getType(tmpInsertedFn));
             assert(fnType.kind === ExpressionKind.FN_TYPE);
             const arg = self.resolved[value.arg];
             if (arg.value === void 0) {
@@ -1946,7 +1954,13 @@ export class HIRSolver {
         while (this.iterate()) {}
     }
     collectDiagnostics() {
-        const ret = this.csolver.collectDiagnostics();
+        const ret: TypeCheckDiagnostic[] = [];
+        for (let i = 0, a = this.regs, b = this.resolved; i < a.length; i++) {
+            if (b[i].value === void 0) {
+
+            }
+        }
+        ret.push(...this.csolver.collectDiagnostics());
         return ret;
     }
 }
@@ -2129,6 +2143,11 @@ export class Evaluator {
                     if (value !== void 0) {
                         self.doActions(self._evaluate(value, stable));
                         return;
+                    }
+                    for (const arg of args) {
+                        if (arg.kind === ExpressionKind.UNKNOWN && arg.value === void 0) {
+                            stable = false;
+                        }
                     }
                 }
                 const [rules, stable2] = collectRules(expr);

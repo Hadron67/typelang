@@ -49,7 +49,7 @@ async function run(args: string[]) {
         }
         if (diag.length > 0) {
             for (const d of diag) {
-                for (const line of renderTypeCheckDiagnostic(d, stringifier)) {
+                for (const line of renderTypeCheckDiagnostic(d, stringifier, () => [entry, lines])) {
                     console.log(line);
                 }
             }
