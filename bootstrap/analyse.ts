@@ -449,25 +449,22 @@ export class TypeSolver {
     }
 }
 
-export function collectFnArgs(expr: CallExpression): [Expression, Expression[], number[]] {
+export function collectFnArgs(expr: Expression): [Expression, Expression[], number[]] {
     const args: Expression[] = [];
     const colors: number[] = [];
-    let expr0: Expression = unwrapUnknown(expr);
-    while (expr0.kind === ExpressionKind.CALL) {
-        args.unshift(expr0.arg);
-        colors.unshift(expr0.color);
-        expr0 = unwrapUnknown(expr0.fn);
+    while (expr.kind === ExpressionKind.CALL) {
+        args.unshift(expr.arg);
+        colors.unshift(expr.color);
+        expr = unwrapUnknown(expr.fn);
     }
-    assert(args.length > 0);
-    return [expr0, args, colors];
+    return [expr, args, colors];
 }
 
-export function getFn(expr: CallExpression) {
-    let expr0: Expression = unwrapUnknown(expr);
-    while (expr0.kind === ExpressionKind.CALL) {
-        expr0 = unwrapUnknown(expr0.fn);
+export function getFn(expr: Expression) {
+    while (expr.kind === ExpressionKind.CALL) {
+        expr = unwrapUnknown(expr.fn);
     }
-    return expr0;
+    return expr;
 }
 
 export function collectFnTypeColors(expr: Expression) {
@@ -926,7 +923,28 @@ export function canUseEtaReduction(expr: CallExpression) {
     if (arg.kind !== ExpressionKind.VARIABLE) {
         return false;
     }
-    return variableFreeQ(expr.fn, arg);
+    // return variableFreeQ(expr.fn, arg);
+    // looks like following check is still not robust, the head may be an unknown and resolves to a symbol with down value
+    const [fn, args] = collectFnArgs(expr.fn);
+    if (fn.kind === ExpressionKind.SYMBOL && fn.downValueCount > 0) {
+        return false;
+    }
+    if (!variableFreeQ(fn, arg)) {
+        return false;
+    }
+    for (const arg0 of args) {
+        if (arg0.kind === ExpressionKind.SYMBOL && arg0.upValueCount > 0) {
+            return false;
+        }
+        if (!variableFreeQ(arg0, arg)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function canUseEtaReductionOn2Expr(expr1: CallExpression, expr2: Expression) {
+    return canUseEtaReduction(expr1) && !sameQ(getFn(expr1), getFn(expr2));
 }
 
 export function sameQ(expr1: Expression, expr2: Expression) {
@@ -1271,20 +1289,7 @@ export class ConstraintSolver {
                     expr2 = t;
                 }
             }
-            if (!freeQ(expr2, expr => expr === expr1)) {
-                logger.info(() => `rejecting unknown assign ${stringifier.stringify(expr1)} = ${stringifier.stringify(expr2)}`);
-                return false;
-            }
-            if (expr1.type !== void 0) {
-                this.addEqualConstraint(expr1.type, this.getType(expr2));
-            }
-            logger.info(() => {
-                let excluded: string[] = [];
-                (expr1 as UnknownExpression).excludedVariables.forEach(v => excluded.push(this.stringifier.stringify(v)));
-                return `setting unknown ${stringifier.stringify(expr1)} = ${stringifier.stringify(expr2)}, excluded = {${excluded.join(', ')}}`;
-            });
-            expr1.value = expr2;
-            return true;
+            return this.setUnknown(expr1, expr2);
         }
         if (expr1.kind === ExpressionKind.NUMBER && expr2.kind === ExpressionKind.NUMBER && expr1.isLevel && expr2.isLevel && expr1.value === expr2.value) {
             return true;
@@ -1326,8 +1331,8 @@ export class ConstraintSolver {
                     return true;
                 }
             }
-            let eta1 = canUseEtaReduction(expr1);
-            if (!eta1 && expr2.kind === ExpressionKind.CALL && canUseEtaReduction(expr2)) {
+            let eta1 = canUseEtaReductionOn2Expr(expr1, expr2);
+            if (!eta1 && expr2.kind === ExpressionKind.CALL && canUseEtaReductionOn2Expr(expr2, expr1)) {
                 eta1 = true;
                 const t = expr1;
                 expr1 = expr2;

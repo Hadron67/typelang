@@ -191,4 +191,23 @@ module logic {
 
     l2: [n, n', A: Type(n), B: Type(n')] -> (A -> B) -> (not(B) -> not(A));
     l2(?f, ?nb, ?a) = nb(f(a));
+
+    l3: [n, A: Type(n)] -> not(not(not(A))) -> not(A);
+    l3[?, ?A] = l2(l1[_, A]);
+}
+
+module cubical {
+    I: Type(0);
+    i0: I;
+    i1: I;
+
+    PathP: [n](A: I -> Type(n)) -> A(i0) -> A(i1) -> Type(n);
+    as-fn: [n, A: I -> Type(n), x, y] -> PathP(A, x, y) -> (x: I) -> A(x);
+    as-fn[?, ?, ?x, ?y](?, i0) = x;
+    as-fn[?, ?, ?x, ?y](?, i1) = y;
+
+    Path: [n, A: Type(n)] -> A -> A -> Type(n);
+    Path[?, ?A] = PathP(\_ A);
+
+    refl: [n, A: Type(n)](x: A) -> Path(x, x);
 }
