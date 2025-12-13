@@ -21,7 +21,14 @@ const NO_LOG: Logger = {
     info() {},
 };
 
-async function run(entry: string, logger: Logger) {
+async function run(args: string[]) {
+    let logger = NO_LOG;
+    if (args[0] === '-v') {
+        logger = VERBOSE;
+        args.shift();
+    }
+    const entry = args[0];
+
     const file = await readFile(entry, 'utf-8');
     const lines = file.split('\n').map(e => e + '\n');
     const builtins = new BuiltinSymbols();
@@ -37,7 +44,9 @@ async function run(entry: string, logger: Logger) {
         const solver = new HIRSolver(root, parseResult.value.regs, csolver);
         solver.run();
         const diag = solver.collectDiagnostics();
-        logger.info(() => stringifier.dumpSymbol(root));
+        for (const line of stringifier.dumpSymbol(root)) {
+            console.log(line);
+        }
         if (diag.length > 0) {
             for (const d of diag) {
                 for (const line of renderTypeCheckDiagnostic(d, stringifier)) {
@@ -54,4 +63,4 @@ async function run(entry: string, logger: Logger) {
     }
 }
 
-run(process.argv[2], VERBOSE);
+run(process.argv.slice(2));
