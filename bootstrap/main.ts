@@ -29,6 +29,8 @@ async function run(args: string[]) {
     }
     const entry = args[0];
 
+    const start = new Date();
+
     const file = await readFile(entry, 'utf-8');
     const lines = file.split('\n').map(e => e + '\n');
     const builtins = new BuiltinSymbols();
@@ -61,6 +63,8 @@ async function run(args: string[]) {
             }
         }
     }
+    const end = new Date();
+    console.log(`done in ${end.valueOf() - start.valueOf()}ms`);
 }
 
 run(process.argv.slice(2));
