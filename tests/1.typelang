@@ -51,6 +51,38 @@ module Sigma: [n, n'](A: Type(n)) -> (A -> Type(n')) -> Type(builtin.Level.max(n
     second(pair(?a, ?b)) = b;
 }
 
+module Sum: [n, n'] -> Type(n) -> Type(n') -> Type(builtin.Level.max(n, n')) {
+    left: [n, n', A: Type(n), B: Type(n')] -> A -> Self(A, B);
+    right: [n, n', A: Type(n), B: Type(n')] -> B -> Self(A, B);
+
+    swap: [n, n', A: Type(n), B: Type(n')] -> Self(A, B) -> Self(B, A);
+    swap(left(?x)) = right(x);
+    swap(right(?x)) = left(x);
+
+    module assoc: [n, n', n'', A: Type(n), B: Type(n'), C: Type(n'')] -> Self(Self(A, B), C) -> Self(A, Self(B, C)) {
+        Self(left(left(?x))) = left(x);
+        Self(left(right(?x))) = right(left(x));
+        Self(right(?x)) = right(right(x));
+
+        inv: [n, n', n'', A: Type(n), B: Type(n'), C: Type(n'')] -> Sum(A, Sum(B, C)) -> Sum(Sum(A, B), C);
+        inv(left(?x)) = left(left(x));
+        inv(right(left(?x))) = left(right(x));
+        inv(right(right(?x))) = right(x);
+    }
+
+    mapLeft: [n, n', n'', A: Type(n), B: Type(n'), A': Type(n'')] -> Self(A, B) -> (A -> A') -> Self(A', B);
+    mapLeft(left(?x), ?f) = left(f(x));
+    mapLeft(right(?y), ?) = right(y);
+
+    mapRight: [n, n', n'', A: Type(n), B: Type(n'), B': Type(n'')] -> Self(A, B) -> (B -> B') -> Self(A, B');
+    mapRight(left(?x), ?) = left(x);
+    mapRight(right(?y), ?f) = right(f(y));
+
+    mapBoth: [n1, n2, n1', n2', A: Type(n1), B: Type(n2), A': Type(n1'), B': Type(n2')] -> Self(A, B) -> (A -> A') -> (B -> B') -> Self(A', B');
+    mapBoth(left(?x), ?fa, ?fb) = left(fa(x));
+    mapBoth(right(?y), ?fa, ?fb) = right(fb(y));
+}
+
 module Nat: Type(0) {
     zero: Self;
     succ: Self -> Self;
@@ -104,11 +136,45 @@ module Nat: Type(0) {
         assoc(?x, ?y, succ(?z)) = Eq.concat(Eq.ap(\z plus(z, mul(x, y)), assoc(x, y, z)), Eq.inv(distro(x, mul(y, z), y)));
     }
 
+    module pow: Self -> Self -> Self {
+        Self(?a, zero) = succ(zero);
+        Self(?a, succ(?b)) = mul(Self(a, b), b);
+    }
+
+    module le: Self -> Self -> Type(0) {
+        Self(?n, ?m) = Sigma(Nat, \k Eq(plus(n, succ(k)), m));
+
+        lem: (a: Nat, b: Nat) -> Sum(Self(a, b), Sum(Eq(a, b), Self(b, a)));
+        lem(zero, zero) = Sum.right(Sum.left(Eq.refl(_)));
+        lem(zero, succ(?b)) = Sum.left(Sigma.pair(b, plus.commu(zero, succ(b))));
+        lem(succ(?a), zero) = Sum.right(Sum.right(Sigma.pair(a, plus.commu(zero, succ(a)))));
+        lem(succ(?a), succ(?b)) = Sum.mapBoth(lem(a, b),
+            \v Sigma.pair(Sigma.first(v), Eq.concat(Eq.ap(succ, Eq.inv(plus.l2(a, Sigma.first(v)))), Eq.ap(succ, Sigma.second(v)))),
+            \vb Sum.mapBoth(vb,
+                \e Eq.ap(succ, e),
+                \v Sigma.pair(Sigma.first(v), Eq.concat(Eq.ap(succ, Eq.inv(plus.l2(b, Sigma.first(v)))), Eq.ap(succ, Sigma.second(v)))),
+            ),
+        );
+    }
+
     module leq: Self -> Self -> Type(0) {
         Self(?n, ?m) = Sigma(Nat, \k Eq(plus(n, k), m));
 
         trans: [a: Nat, b: Nat, c: Nat] -> Self(a, b) -> Self(b, c) -> Self(a, c);
         trans[?a, ?b, ?c](Sigma.pair(?k1, ?p1), Sigma.pair(?k2, ?p2)) = Sigma.pair(plus(k1, k2), Eq.concat(Eq.inv(plus.assoc(a, k1, k2)), Eq.concat(Eq.ap(\y plus(y, k2), p1), p2)));
+    }
+}
+
+module Rational: Type(0) {
+    rational: Nat -> Nat -> Self;
+    reduce-eq: (a: Nat, b: Nat, c: Nat) -> Eq(rational(a, b), rational(Nat.mul(a, c), Nat.mul(b, c)));
+
+    module plus: Self -> Self -> Self {
+        Self(rational(?a, ?b), rational(?c, ?d)) = rational(Nat.plus(Nat.mul(a, d), Nat.mul(b, c)), Nat.mul(b, d));
+    }
+
+    module mul: Self -> Self -> Self {
+        Self(rational(?a, ?b), rational(?c, ?d)) = rational(Nat.mul(a, c), Nat.mul(b, d));
     }
 }
 
@@ -215,6 +281,39 @@ module cubical {
     Square: [n, A: Type(n), x0: A, x1, y0: A, y1] -> Path(x0, x1) -> Path(y0, y1) -> Path(x0, y0) -> Path(x1, y1) -> Type(n);
     Square(?p, ?q, ?r, ?s) = PathP(\i Path(as-fn(p, i), as-fn(q, i)), r, s);
 
-    fnext: [n, n', A: Type(n), B: A -> Type(n'), f: (x: A) -> B(x), g: (x: A) -> B(x)] -> ((x: A) -> Path(f(x), g(x))) -> Path(f, g);
+    fnext: [n, n', A: Type(n), B: A -> Type(n'), f: (x: A) -> B(x), g] -> ((x: A) -> Path(f(x), g(x))) -> Path(f, g);
     as-fn(fnext(?p), ?i, ?x) = as-fn(p(x), i);
+}
+
+module Ordinal: Type(0) {
+    zero: Self;
+    succ: Self -> Self;
+    lim: (Nat -> Self) -> Self;
+
+    module gt: Self -> Self -> Type(0) {
+        zero: (a: Ordinal) -> Self(Ordinal.succ(a), Ordinal.zero);
+        succ: (a: Ordinal) -> Self(Ordinal.succ(a), a);
+        lim: (i: Nat, f: Nat -> Ordinal) -> Self(Ordinal.lim(f), f(i));
+        trans: (a: Ordinal, b: Ordinal, c: Ordinal) -> Self(a, b) -> Self(b, c) -> Self(a, c);
+
+        fn: (f: Nat -> Ordinal, g: Nat -> Ordinal) -> Sigma(Nat, \k (x: Nat) -> Sum(Nat.leq(k, x), Self(f(x), g(x))));
+    }
+
+    module omega: Self {
+        Self = lim(f);
+
+        f: Nat -> Ordinal;
+        f(Nat.zero) = zero;
+        f(Nat.succ(?x)) = succ(f(x));
+    }
+
+    module plus: Self -> Self -> Self {
+        Self(?x, zero) = x;
+        Self(?x, succ(?y)) = succ(Self(x, y));
+        Self(?x, lim(?f)) = lim(\y Self(x, f(y)));
+    }
+}
+
+module Lift: [n] -> Type(n) -> (n': _) -> Type(builtin.Level.max(n, n')) {
+    lift: [n, T: Type(n), n'] -> T -> Self(T, n');
 }

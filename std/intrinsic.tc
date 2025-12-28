@@ -9,23 +9,8 @@ typeof: [n, T: Type(n)] -> T -> Type(n);
 #[inline]
 typeof[?, ?T](?) = T;
 
-module List {
-    Self: [n, T: Type(n)] -> T -> Type(n);
-}
-module Level {
-    Self: MetaType;
-    zero: Self;
-    succ: Self -> Self;
+asm: string -> void;
 
-}
-
-module Level {
-    Self: Type(0);
-    zero: Self;
-    succ: Self -> Self;
-}
-Type: (i: Level) -> Type(succ(i));
-
-module Sigma {
-    Self: [n, n', A: Type(n), P: A -> Type(n')] -> ((x: A) -> P(x)) -> Type(Leve.max(n, n'));
+module MetaDict: MetaType {
+    getInfo: Self -> string -> TypeInfo;
 }

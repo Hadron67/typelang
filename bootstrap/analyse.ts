@@ -121,6 +121,7 @@ export interface UnknownExpression {
     readonly type?: Expression;
     readonly isPattern: boolean;
     readonly excludedVariables: Set<VariableExpression>;
+    readonly loc?: SourceRange;
     value?: Expression;
 }
 
@@ -130,7 +131,6 @@ export interface SymbolData {
     readonly parent: Symbol | null;
     readonly evaluator?: (args: Expression[]) => Expression | null;
     readonly flags: number;
-    removed?: boolean;
     subSymbols?: Map<string, Symbol>;
     type?: Expression;
     value?: Expression;
@@ -311,6 +311,7 @@ export class BuiltinSymbols {
         const ret = new Map<string, SymbolExpression>();
         ret.set('Type', this.type);
         ret.set('builtin', this.builtin);
+        ret.set('void', this.unitType);
         return ret;
     }
     makeLevelMax(a1: Expression, a2: Expression): Expression {
@@ -1827,6 +1828,8 @@ export class HIRSolver {
                 if (arg !== void 0 || type.arg !== void 0) {
                     if (arg === void 0) {
                         arg = {kind: ExpressionKind.VARIABLE, defaultType: type.inputType};
+                    } else {
+                        self.csolver.addEqualConstraint(arg.defaultType, type.inputType);
                     }
                     args.push({
                         arg,
